@@ -9,3 +9,6 @@ Thumbs.db
 *cookies*
 *.env
 secrets/
+
+# 贡献者各自的本地禁词清单（自己的用户名/工作区目录名），永远不提交
+scripts/forbidden.local.txt

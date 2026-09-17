@@ -10,6 +10,7 @@ Exit 0 = no error-severity finding. Red-line classes are split ERROR / WARN on
 purpose: a lint that cries wolf gets ignored, and a lint that never fires is worse.
 """
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -19,14 +20,30 @@ SECTION_RE = re.compile(r"^## (\d+)\. (.+)$")
 XREF_RE = re.compile(r"([a-z0-9]+(?:-[a-z0-9]+)*)`?\s*§\s*(\d+)")
 STAMP_RE = re.compile(r"\*\*验证于\*\*")
 
+# Machine-specific identity tokens (your username, your workspace folder name)
+# must NOT be hard-coded here, or the lint itself publishes them. Put one per
+# line in scripts/forbidden.local.txt (gitignored); the lint then blocks them.
+LOCAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forbidden.local.txt")
+
+
+def _local_tokens():
+    if not os.path.exists(LOCAL_FILE):
+        return []
+    with open(LOCAL_FILE, encoding="utf-8") as fh:
+        return [ln.strip() for ln in fh
+                if ln.strip() and not ln.lstrip().startswith("#")][:20]
+
+
+LOCAL_TOKENS = _local_tokens()
+
 # ERROR: would ship a real identity / credential out the door.
 REDLINES_HARD = [
-    ("real-username", re.compile(r"\\Users\\(?!<)|\b<owner>\b", re.I)),
-    ("workspace-root", re.compile(r"\b<project>\b", re.I)),
+    ("real-username", re.compile(r"[\\/]{1,2}(?:Users|home)[\\/]{1,2}(?!<)", re.I)),
     ("credential-shaped", re.compile(r"\b(?:ghp_[A-Za-z0-9]{6,}|sk-[A-Za-z0-9]{16,}|api[_-]?key\s*[:=]\s*\S)")),
     ("personal-home-path", re.compile(r"[A-Za-z]:[\\/](?:Users|home)[\\/]")),
     ("nondefault-proxy-port", re.compile(r"(?:127\.0\.0\.1|localhost):(?!9222\b)\d{4,5}")),
-]
+] + [("local-identity-%d" % i, re.compile(re.escape(t), re.I))
+     for i, t in enumerate(LOCAL_TOKENS, 1)]
 # WARN: keep an eye on it, not automatically a leak.
 REDLINES_SOFT = [
     ("bare-drive-path", re.compile(r"(?<!\w)(?!(?:https?|ftp|file|git|ssh):)[A-Za-z]:[\\/](?!<)[\w.\- \u4e00-\u9fff]{2,}")),
@@ -180,7 +197,7 @@ description: x
 ## 1. 示例
 
 - **现象**：见 `no-such-skill §9`
-- **根因**：D:\\<project>\\tools\\x.exe 与 C:\\Users\\someone\\x，代理 127.0.0.1:7897，凭据 ghp_ABCDEF123456
+- **根因**：D:\\SomeTool\\tools\\x.exe 与 C:\\Users\\someone\\x，代理 127.0.0.1:7897，凭据 ghp_ABCDEF123456
 - **对策**：读 D:\\work\\keep\\a.txt
 - **判定**：跑 `nc -z 127.0.0.1 7897`
 """
@@ -226,15 +243,21 @@ def _pack(text):
 
 
 def selftest():
-    e1, w1 = check(_pack(DIRTY))
-    all1 = " | ".join(e1 + w1)
+    dirty = DIRTY
     need = {
-        "real-username": "real-username", "workspace-root": "workspace-root",
+        "real-username": "real-username",
         "credential-shaped": "credential-shaped", "nondefault-proxy-port": "nondefault-proxy-port",
         "dangling-xref": "no-such-skill", "bare-drive-path": "bare-drive-path",
     }
+    for i, tok in enumerate(LOCAL_TOKENS, 1):
+        cls = "local-identity-%d" % i
+        need[cls] = cls
+        dirty += "\n- 本地清单第 %d 条：D:\\%s\\tools\\x.exe\n" % (i, tok)
+    e1, w1 = check(_pack(dirty))
+    all1 = " | ".join(e1 + w1)
     missed = [k for k, pat in need.items() if pat not in all1]
-    print(f"脏样本：{len(e1)} error / {len(w1)} warning；应命中 {len(need)} 类，未命中 {missed or '无'}")
+    print(f"脏样本：{len(e1)} error / {len(w1)} warning；应命中 {len(need)} 类"
+          f"（含 {len(LOCAL_TOKENS)} 条本地清单），未命中 {missed or '无'}")
     for x in e1:
         print("   E:", x)
     e2, w2 = check(_pack(CLEAN))
