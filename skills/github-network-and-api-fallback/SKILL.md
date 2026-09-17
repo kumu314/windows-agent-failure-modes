@@ -1,6 +1,6 @@
 ---
 name: github-network-and-api-fallback
-description: Windows 上 GitHub 网络链路的分层排障与 REST API 兜底通道。git 命令连不上但浏览器能用、push 退出码非 0 却一个字都不输出、gh 报 graphql EOF、凭证 401、"我推了你怎么看不到"、命令行长度爆掉、空仓库推不动之前读。触发词：git push 失败、502 CONNECT、schannel、Connection was reset、exit 128、push 无输出、proxy、代理、postBuffer、Out of memory、gh EOF、graphql、401、403、409、422、Contents API、base64、推不上去、连不上 github。
+description: Windows 上 GitHub 网络链路的分层排障与 REST API 兜底通道。git 命令连不上但浏览器能用、push 退出码非 0 却一个字都不输出、gh 报 graphql EOF、凭证 401、"我推了你怎么看不到"、命令行长度爆掉、空仓库推不动之前读。触发词：502 CONNECT、schannel、Connection was reset、exit 128、proxy、代理、postBuffer、Out of memory、gh EOF、401、403、409、422、Contents API、base64、推不上去、连不上 github。
 agent_created: true
 ---
 
