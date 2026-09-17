@@ -20,6 +20,8 @@ agent_created: true
   ```
   需要视频解码/预览时补 `--use-angle=swiftshader --enable-unsafe-swiftshader`。
 - **判定**：`curl -s http://127.0.0.1:9222/json/version` 有 JSON = 端口真的在听。启动后等 9~10 秒再探，太早必然失败。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · Chrome 153.0.8010.48 · 2026-09-18
+- **复测出入（2026-09-18 · Chrome 153.0.8010.48）**：本机隔离实例（专用 profile + 专用端口）实测**启动后 1 秒内** `curl /json/version` 即返回完整 JSON，10 秒后同样正常——"太早必然失败、需等 9~10 秒"在本机不复现；且 `DevTools listening on ws://…` 在启动时直接打印到输出，可据此判就绪。两版并存：以"能拿到 JSON"为唯一就绪判据（原文判定句照旧），固定等待秒数只是保守兜底。
 
 ## 2. Chrome 不读环境变量代理
 
@@ -53,6 +55,8 @@ agent_created: true
     python -c "import sys,json,collections;d=json.load(sys.stdin);print('total',len(d),dict(collections.Counter(t.get('type') for t in d)))"
   ```
   数量离谱就**只精准关脚本自己开的重复 page**（见 §3），再重试 connect。**不要**因为"连不上"就直接杀 Chrome——那是最贵的一步，还会连带丢登录态。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · Chrome 153.0.8010.48 · python 3.12.10 · 2026-09-18
+- **复测确认（2026-09-18 · Chrome 153）**：计数命令实测有效：`total 6 {'background_page': 2, 'page': 1, 'browser_ui': 2, 'service_worker': 1}`。注意新版 Chrome 的 target 类型比 page/iframe 丰富（出现 `background_page`、`browser_ui`、`service_worker`）——统计时按完整 Counter 打出来，别只看 page 数。
 
 ## 5. 恢复顺序：按代价从低到高，别跳级
 
@@ -60,6 +64,8 @@ agent_created: true
 2. `curl /json/list` —— target 数是否失控（§4）。
 3. 重试 `connect_over_cdp`，**timeout 给到 60000**（30s 会在 ws 已连的情况下仍报 `Timeout 30000ms exceeded`；先探活成功再 connect，重试带 3~4s 退避，实测 3~4 次内自愈）。
 4. 仍不行才重启：先干净关（§6）→ 自定义 profile 重启（需要时先继承 Cookie）→ 等端口就绪。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · Chrome 153.0.8010.48 · 2026-09-18
+- **部分复测（2026-09-18）**：第 1、2 步（`/json/version` 探活、`/json/list` 数 target）在隔离实例上实测有效，是重试前最省的两步；第 3 步 `connect_over_cdp` 依赖 CDP 客户端环境，本轮未复测。
 
 ## 6. 杀不掉、以及"杀掉"这件事本身
 
@@ -67,6 +73,18 @@ agent_created: true
 - **根因**：Git Bash/MSYS 把 `//F` 重写掉了（详见 shell-quoting-and-path-forms §7）。
 - **对策**：用**单斜杠** `taskkill /F /IM chrome.exe`；**每次杀完必须 `tasklist | grep -i chrome` 复查**，把输出当证据，不要相信"命令跑完了"。
 - **红线**：这只针对脚本自己起的调试 Chrome。用户机器上可能有别的 Chrome 窗口属于他正在做的事——批量关之前先确认不会误杀（关页面/重启等于动用户的账号会话，属于对外可见的动作）。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · git 2.53.0.windows.2 · cmd 10.0 · 2026-09-18
+- **复测出入（2026-09-18 · Git Bash 5.2.37 / git 2.53.0.windows.2，与原文对策方向相反）**：本机实测完整矩阵（全部用不存在的进程名，或本实例 PID，无副作用）：
+
+  | 写法 | 实际结果 |
+  |---|---|
+  | `taskkill //F //IM <名>`（Git Bash 直调） | **参数正确**：`错误: 没有找到进程 "…"`（解析正常，说明 `//F` 被转成 `/F`） |
+  | `taskkill /F /IM <名>`（Git Bash 直调） | **被转换**：`错误: 无效参数/选项 - 'F:/'` —— `/F` 被 MSYS 当路径转成 `F:/` |
+  | `cmd /c "echo hello"` | **`/c` 同样被转换**：cmd 进交互模式只打印版本横幅，命令根本没执行 |
+  | `cmd //c "echo hello"` / `cmd //c "taskkill /F /IM <名>"` | **正确**：输出 `hello` / `错误: 没有找到进程 "…"` |
+  | `MSYS_NO_PATHCONV=1 taskkill /F /IM <名>`（或 `MSYS_NO_PATHCONV=1 cmd /c …`） | **正确**：参数原样传递 |
+
+  真实清理验证：`taskkill //F //PID <本实例 PID>` 退出码 0，随后 `curl /json/version` 立即失联（进程真死）。**结论**：原文"用单斜杠并整体交给 `cmd /c`"在本机环境下两半都不能工作（`/F` 与 `/c` 都会被 MSYS 转换）；Git Bash 直调写 `//F //IM`，需要 cmd 包装写 `cmd //c "taskkill /F /IM …"`，或用 `MSYS_NO_PATHCONV=1` 前缀。两版并存（原文按 cmd.exe 直接调用/旧版 MSYS 理解），同批复测注记见 shell-quoting-and-path-forms §7。
 
 ## 7. 登录态继承：复制 profile 的时机与前置条件
 
@@ -97,7 +115,14 @@ agent_created: true
 - **对策**：凡中间要扫码/验证码/人工确认的长流程，正解是**让用户在桌面会话里双击启动脚本**，agent 只负责连接；并且脚本按 §5 设计成断连可续。
 - **判定**：同一条探测跑两次，中间**不做任何启动动作**——第一次在启动它的那次调用内，第二次在一个新调用里。第一次拿得到 JSON、第二次拿不到（连不上或空输出）＝ 进程被回收，不是端口写错，改走"用户侧启动 + agent 只连"。
 - **状态**：复盘条目。判定按流程执行有效，但"哪一次调用回收"的时机未在本机逐字复测，端口一律写 `<端口>`。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · Chrome 153.0.8010.48 · 2026-09-18
+- **复测差异（2026-09-18 · ZCode Bash 工具环境）**：**未复现**回收——`&` 后台启动的隔离调试 Chrome 在两个**独立工具调用**之间持续存活（第二次调用 `curl /json/version` 仍返回完整 JSON），直到手动按 PID 终止。原结论保留（回收行为取决于宿主工具的实现，本条描述的情形可能适用于其他 agent 宿主）；判定方法不变：跨调用探测两次，一次拿得到、一次拿不到即命中。
 
 ## 复用信号
 
 "连不上 9222" → §1（profile）或 agent 起的进程被回收（§10）；"curl 通 Chrome 不通" → §2；"越用越卡/握手挂" → §4；"跑到一半 TargetClosedError" → §5 + §10；"复制了 Cookie 还是登录页" → §7；"接口 200 但没登录" → §8。
+
+## 本轮复测范围（2026-09-18）
+
+- **已复测**（§1 / §4 / §5 前两步 / §6 / §10，隔离实例 + 专用 profile 启动，未触碰任何用户会话）：结论见各节注记，其中 §1（就绪等待时间）与 §6（`//F` vs `/F`）各有一处与原文不符或方向相反的出入，已按"保留两版 + 标适用范围"处理。
+- **未复测**：§2（需真实代理环境对比）、§3（禁令，不可也不应实测）、§7（涉及真实 Cookie/登录态，红线）、§8（需真实登录场景）、§9（需 CDP 客户端库连接）。未复测 ≠ 不成立，仅表示本轮无人值守条件下未取得新证据。

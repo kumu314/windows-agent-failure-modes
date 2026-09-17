@@ -55,6 +55,8 @@ agent_created: true
 - **根因**：MSYS 的路径转换把 `//F` 当路径前缀处理成无效参数，而命令本身不报错。双斜杠是"防止被转换"的历史偏方，副作用是静默失败。
 - **对策**：在 Git Bash 里调 Windows 原生命令用**单斜杠**并整体交给 `cmd /c "taskkill /F /IM chrome.exe"`，或直接改用 PowerShell；杀完必须 `tasklist | grep -i chrome` 复核。
 - **判定**：`exit 0` + 进程仍在 = 命中本条；真报错反而是别的成因。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · git 2.53.0.windows.2 · cmd 10.0 · 2026-09-18
+- **复测出入（2026-09-18 · Git Bash 5.2.37 / git 2.53.0.windows.2，与原文方向相反）**：本机实测（完整矩阵见 chromium-cdp-on-windows §6 同批注记；全部用不存在的进程名或本实例 PID，无副作用）——`taskkill //F //IM <名>` 的 `//F` **被正确转成 `/F` 传给 taskkill**（报"没有找到进程"而非参数错误），`taskkill //F //PID <本实例 PID>` 退出码 0 且进程真的终止（`curl /json/version` 立即失联）；反过来 `taskkill /F /IM <名>` 报 `错误: 无效参数/选项 - 'F:/'`（`/F` 被当路径转成 `F:/`）。`cmd /c` 包装同理：`cmd /c "echo hello"` 里的 `/c` 也被转换（cmd 进入交互模式只打印版本横幅），须写 `cmd //c "taskkill /F /IM …"` 才真正执行；加 `MSYS_NO_PATHCONV=1` 前缀则单斜杠可直接用。**两版并存**：原文现象（`//F` 静默失败）若在特定 MSYS 版本/配置上成立，请补版本号；本机适用范围是 Git Bash 5.2.37——正确写法为 `//X`、或 `cmd //c "…"` 包装、或 `MSYS_NO_PATHCONV=1` 前缀。
 
 ## 8. 含空格路径传给转发型 CLI：不报错，而是被拆成多个参数
 
