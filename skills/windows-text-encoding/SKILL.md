@@ -1,6 +1,6 @@
 ---
 name: windows-text-encoding
-description: Windows 文本编码与 BOM 判定手册。写/改 PowerShell 脚本、批处理 .bat、含中文的数据文件、脚本"运行成功但输出乱码"、读别人给的文件出现替换字符之前读。触发词：乱码、编码、BOM、efbbbf、UTF-8 读坏、GBK、cp936、chcp、Get-Content、解析器报 invalid start byte、中文变问号、脚本改完不生效、行尾被改写、CRLF、autocrlf、git ls-files --eol、i/lf w/crlf、哈希对不上但 git status 干净。
+description: Windows 文本编码、BOM 与行尾判定手册。写/改 PowerShell 脚本、批处理 .bat、含中文的数据文件、脚本“运行成功但输出乱码”、读别人给的文件出现替换字符、本地文件哈希与仓库 blob 对不上之前读。触发词：乱码、编码、BOM、efbbbf、fffe、UTF-16、GBK、cp936、chcp、Get-Content、Out-File、Set-Content、PYTHONUTF8、preferredencoding、CRLF、autocrlf、invalid start byte、中文变问号、脚本改完不生效。
 agent_created: true
 ---
 
@@ -106,6 +106,40 @@ agent_created: true
   **两个现场踩到的坑**：① 反引用**必须写在单引号里**。写成 `$'^…w/\1'` 会被 bash 当八进制转义吃掉，模式里变成一个 `0x01` 字节，反引用永不匹配 → `grep -v` **把所有行都吐出来且退出码 0**，一眼看去像"全仓库每个文件都被改了"（实测：同一命令在干净的本仓库上，单引号版退出码 1/0 行输出，`$'…'` 版退出码 0/把跟踪文件全列出来）。② `grep` 的退出码方向和"有没有问题"是**反的**（0=匹配到=有问题，1=没匹配到=安全），别按 `silent-failure-triage §1` 的直觉读。
 - **验证于**：Windows 10.0.26200.0（`cmd /c ver` 报 10.0.26200.9457）· Git Bash `GNU bash 5.2.37(1)-release (x86_64-pc-msys)` · git 2.53.0.windows.2 · zh-CN / ACP 936（`[Text.Encoding]::Default` = `gb2312`）· 2026-09-17
 
+## 8. 「默认编码」按客户端各定各的：拿到命令先走五岔链，**退出码不参与判定**
+
+- **现象**（中文 Windows 实测，ACP/OEMCP 均 936）：同一句 `中文测试` 交给四个客户端落盘，落成**三种编码**，**四条命令退出码全为 0**（长度取 `stat -c %s`，字节取 Git Bash 自带 `xxd`）：
+  ```bash
+  printf '中文测试\n' > a.txt                                  # 13 B  e4 b8 ad e6 96 87 e6 b5 8b e8 af 95 0a      无 BOM UTF-8 + LF
+  powershell -Command "'中文测试' | Out-File b.txt"             # 14 B  ff fe 2d 4e 87 65 4b 6d d5 8b 0d 00 0a 00  UTF-16LE + BOM
+  powershell -Command "Set-Content -Path c.txt -Value '中文测试'" # 10 B  d6 d0 ce c4 b2 e2 ca d4 0d 0a             GBK/cp936（无 BOM）
+  MSYS_NO_PATHCONV=1 cmd /c "echo 中文测试 > d.txt"              # 11 B  d6 d0 ce c4 b2 e2 ca d4 20 0d 0a           同上 GBK，外加 echo 把 `>` 前那个空格也写进去
+  ```
+  读侧同样各说各话，而且**大多不报错**：`Get-Content c.txt -Encoding UTF8 | Out-File -Encoding utf8 c_fix.txt` 全程 exit 0，那 4 个汉字变成 6 个 U+FFFD + 1 个 `Ĳ`（10 B → 25 B），再落一次 ANSI 只剩 `3f 3f 3f 3f 3f 3f 3f`——原文永久没了；`node -e` 以默认 `utf8` 读同一个 GBK 文件也 exit 0、静默塞 U+FFFD；只有 Python `open('a.txt')` 抛 `UnicodeDecodeError: 'gbk' codec can't decode byte 0xad in position 2`（exit 1）——**但同一份代码读 UTF-8 的 `你好世界` 却 exit 0 解出 `浣犲ソ涓栫晫`**。同机器两套运行时给出相反默认值：`locale.getpreferredencoding(False)=cp936` 对 `Buffer.from('中文测试').length=12`。
+- **根因**：编码不是文件的属性，是**每个客户端各自的默认值**，而这台机器上这些默认值来自六处、互不相同，且没有任何一层会提示你它替做了决定：bash 侧恒 UTF-8 且与 `LANG` 无关（`LANG=C LC_ALL=C printf` 落盘仍是 `e4 b8 ad…`）；PowerShell 里 `Out-File`/`>` 与 `Set-Content` 的默认**方向相反**；PS 喂原生命令 stdin 另走 `$OutputEncoding`（本机 `us-ascii`）；Python 一条 `import` 里四个"默认"三种答案（`utf-8` / `utf-8` / `cp936` / `gbk`）；Node 恒 `utf8`，`LANG=zh_CN.GBK` 改不动。两个专坑检索与查文档的细节：`[Text.Encoding]::Default` 的 `CodePage=936` 但 `WebName` 报 **`gb2312`**（按 `gbk` grep 搜不到它）；`Set-Content` 本机实测落 GBK（俄文字母 → `a7 a7`，emoji 代理对的两半各降级为一个 `3f`，若真按某些文档说的默认 ASCII 则中文应是全 `3f`），而 `Get-Help Set-Content -Parameter Encoding` 的 `defaultValue` 取回**空**——**默认值只能实测，文档和帮助窗口都会给假答案**。
+- **对策**：① 写侧统一"无 BOM UTF-8"，并按客户端挑工具：bash 直接重定向即可；PowerShell 用 `[IO.File]::WriteAllText($p,$s,(New-Object System.Text.UTF8Encoding($false)))`——实测 5.1 的 `-Encoding utf8`（`Out-File` 与 `Set-Content` 都一样）必带 `ef bb bf`，17 B；Python 显式 `encoding=`（见 python-silent-data-errors §1）；Node 的 `fs.writeFileSync(p,s,'utf8')` 本就落 UTF-8 + LF。② **别指望 `chcp 65001` 能修文件**：实测改完码页后 `Set-Content` 仍落 `d6 d0 ce c4…`、`[Text.Encoding]::Default.CodePage` 仍 936，它只动显示层（见 `windows-text-encoding §3`）。③ **别给单条命令顺手加 `PYTHONUTF8=1`**：实测 `python p1.py | Out-File` 不加得到 UTF-16 里正确的 `中文测试`（14 B），加了得到 18 B 的 6 字符乱码（实测第 2 个字符落在私用区 U+E15F，终端里显示不出来、也没法再编回 GBK）——Python 改吐 UTF-8 字节而 PowerShell 仍按 936 解；要设就整条链一起设。④ 跨 PS→原生命令的管道先 `$OutputEncoding=[Text.Encoding]::UTF8`，实测默认值下 `'中文测试' | python -c "…sys.stdin.buffer.read()…"` 进原生 stdin 的字节就是 `3f 3f 3f 3f`（两侧 exit 0），设完则 stdin 头三字节是 `ef bb bf`（5.1 连管道都加 BOM），读侧按 `utf-8-sig` 打底（见 python-silent-data-errors §7）。⑤ 资产层统一约定见 `windows-text-encoding §5`，本节只解决"先弄清这台机器每个客户端会怎么选"。
+- **判定**：30 秒定死"这条命令会用哪个编码"，五岔顺序取读数，**每岔只看读数、不看退出码**：
+  ```bash
+  # 岔 1｜底座：这台机器的"默认 ANSI"到底是哪个 ANSI
+  chcp.com                                                      # → 936。这行输出本身就是 GBK 字节（实测 bb ee b6 af…），被 UTF-8 捕获层显示成乱码 = `windows-text-encoding §3` 的活教材
+  powershell -NoProfile -Command "[Text.Encoding]::Default.CodePage"   # → 936（WebName=gb2312，同物两名）
+  locale charmap                                                # → UTF-8。bash 与上面两个无关，改 LANG 也不变
+  # 岔 2｜写方：命令行里出现哪个名字，就用哪个默认（同一条 -Command 里可以两种都有）
+  #   Out-File / `>` → UTF-16LE+fffe ｜ Set-Content / Add-Content / -Encoding default|oem → 系统 ANSI
+  #   -Encoding utf8 → UTF-8 但必带 efbbbf ｜ bash 重定向 → 字节透明（程序写什么落什么）
+  # 岔 3｜边界：跨进程几次就重编码几次，先取这两个读数
+  powershell -NoProfile -Command "\$OutputEncoding.WebName;[Console]::OutputEncoding.CodePage"   # → us-ascii / 936
+  # 岔 4｜读方：同机器两套相反答案（Get-Content 的默认另见 `windows-text-encoding §2`）
+  python -c "import sys,locale;print(sys.getdefaultencoding(),sys.getfilesystemencoding(),locale.getpreferredencoding(False),sys.stdout.encoding)"   # → utf-8 utf-8 cp936 gbk
+  node -e "console.log(Buffer.from('中文测试').length)"           # → 12；Node 侧恒 UTF-8，不受 ACP 影响
+  # 岔 5｜字节验收（唯一有效判据）
+  python -X utf8 -c "import sys;b=open(sys.argv[1],'rb').read();g=lambda e:b.decode(e,'replace')==b.decode(e,'ignore');print('%-12s len=%-4d head=%-23s utf8=%-5s gbk=%-5s hasFFFD=%s'%(sys.argv[1],len(b),b[:8].hex(' '),g('utf-8'),g('gbk'),chr(0xfffd) in b.decode('utf-8','ignore')))" <文件>
+  ```
+  期望读数（本机实测，缺一即命中）：无 BOM UTF-8 `utf8=True gbk=False`；GBK `utf8=False gbk=True`；UTF-16LE `utf8=False gbk=False` 且 `head=ff fe…`（**UTF-16 只认 BOM**——偶长字节丢给 `utf-16` 一定"解得开"，实测把 GBK 文件按 utf-16 解会出 `탖쓎…`，参与投票必误判）。两条阶梯查不出来的情况要记住：`utf8=True hasFFFD=True` 是"**已经坏了但能解**"（`c_fix.txt` 就是这样），一旦 `hasFFFD` 为真就别再往这个文件写任何东西；`head=3f 3f 3f 3f` 是"中文已被替换成问号"，它是合法 ASCII，阶梯两头都 True，只能靠"写方是谁"+ 与已知好的字节对比发现。`?`/U+FFFD 一旦出现即不可逆：实测把那条 `PYTHONUTF8=1` 产出的 mojibake 串（13 B 的 UTF-8 源文件变成 18 B 的 UTF-16 乱码文件）拿 `.encode('gbk')` 想还原，会先撞 `UnicodeEncodeError: '\ue15f' illegal multibyte sequence`。**退出码不能当编码判据**——同一类 UTF-8 中文，Python 默认读 `中文测试` 抛异常 exit 1、读 `你好世界` 静默 exit 0；何况管道还会让 `$?` 说谎（见 silent-failure-triage §1）。
+  本机可用工具边界（判定链依赖它们）：`iconv`/`jq`/`bc`/`rev`/`pwsh` **都不存在**，所以"Git Bash 里一行转码"这条路直接不可用，跨码页转换只剩显式两端指定（Python `encoding=`，或实测可用的 `node -e "new TextDecoder('gbk').decode(...)"`，本机 Node 带全 ICU）；`file -b` 会把 GBK 报成 `ISO-8859 text`，不可信；取字节用 `xxd`（Git Bash）或 `Format-Hex`（仅 PowerShell 内）。另注意 `python3` 在本机是 0 字节 App Execution Alias 壳（`--version` 零输出、**exit 49**，`Length=0` + `ReparsePoint`，见 runtime-resolution-and-abi §1），`py -3` 指向一个不存在的路径、**exit 101**，且它报错末尾那串 `?` 是**生产端就已经写出的 `3f` 真字节**、不是显示层（见 runtime-resolution-and-abi §2）——所以本节所有 Python 读数都是用 PATH 里第一个真解释器（3.12.10）取的。调 `cmd` 取"第三个客户端"的读数时也别裸写 `cmd /c "…"`：MSYS 会把 `/c` 当路径重写掉，结果起了个交互式 cmd、**照样 exit 0** 且一个文件都没落（实测），必须加 `MSYS_NO_PATHCONV=1`（见 shell-quoting-and-path-forms §7）。
+- **验证于**：Windows 11 家庭版 中文版 10.0.26200.9457（zh-CN，ACP=OEMCP=936，`Get-Culture`/`Get-WinSystemLocale`/`Get-UICulture` 均 zh-CN，注册表 `Nls\CodePage` 的 ACP/OEMCP 都 936 = 没开系统级 UTF-8） · Git Bash 5.2.37(1)-release(x86_64-pc-msys) / MINGW64_NT-10.0-26200 / MSYS 3.6.6，本会话 `LANG`/`LC_ALL=C.UTF-8` 为父进程注入（`env -u LANG` 后 Git Bash 自己给 `zh_CN.UTF-8`，两种取值下 `printf` 落盘字节完全相同） · Windows PowerShell 5.1.26100.9444（本机无 pwsh 7） · Python 3.12.10（`<用户名>\AppData\Local\Programs\Python\Python312\python.exe`） · Node v24.18.0 · git 2.53.0.windows.2 · 2026-09-17
+
 ## 复用信号
 "改完脚本没生效""只有中文出错""同一文件我看得懂下游看不懂""读到一串问号""解码没报错但内容是乱的" → 一律先取字节再看，别在文本层推理。
 - "本地文件哈希和仓库 blob 哈希对不上、但 `git status` 说干净""clone 出来的文件字节数和上游不一样""`git add` 一个字没说、push 上去的内容却变了""`i/lf w/crlf` 这种字段看不懂" → §7（`core.autocrlf` 在转换管道里静默重写行尾，git 侧信号全部报"相同"）。
+- "同一句话在 bash 里是 UTF-8、在 PowerShell 里变 UTF-16、在 Set-Content 里变 GBK""退出码 0 但中文成了问号""Get-Content 读回来再写回去就坏了" → §8（默认编码是每个客户端各自的默认值，退出码不参与判定）
