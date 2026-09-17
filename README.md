@@ -24,7 +24,7 @@ cp -r skills/* ~/.claude/skills/
 | Skill | 一句话 |
 |---|---|
 | [shell-quoting-and-path-forms](skills/shell-quoting-and-path-forms/SKILL.md) | Git Bash/MSYS 的引号与路径形态：命令替换吃掉反引号、heredoc 吞反斜杠、`/d/` 与 `/tmp` 原生程序不认、`//F` 被重写后静默失败、含空格路径被拆成多参数、`$(…)` 剥掉尾换行造成哈希假不等、过 260 字符后半数工具连"文件存在"都看不见、junction 各家答案不同、`[ -L ]` 取决于有没有尾斜杠，而吃掉目标内容的是路径尾反斜杠和 `del /f /s /q` |
-| [silent-failure-triage](skills/silent-failure-triage/SKILL.md) | "退出码 0 但没做成"的总账：管道让 `$?` 说谎（bash 与 cmd，PowerShell 不受影响）、空输出的三种成因（含下游工具没装时字段变空串而退出码仍是 0）、假同步与假陈旧、计划任务注册了却永不运行、解释器"存在"是 0 字节壳、校验脚本自己会失效（对照样本没进扫描面所以对照不响；缺失文件的哈希是空串，被读成"内容不同"而全量报错） |
+| [silent-failure-triage](skills/silent-failure-triage/SKILL.md) | "退出码 0 但没做成"的总账：管道让 `$?` 说谎（bash 与 cmd，PowerShell 不受影响）、空输出的三种成因（含下游工具没装时字段变空串而退出码仍是 0）、假同步与假陈旧、计划任务注册了却永不运行、解释器"存在"是 0 字节壳、校验脚本自己会失效（对照样本没进扫描面所以对照不响；缺失文件的哈希是空串，被读成"内容不同"而全量报错；写成多行的检查链里某步静默失败而总结论照样打印） |
 | [windows-text-encoding](skills/windows-text-encoding/SKILL.md) | 编码、BOM 与行尾：`.ps1` 要 BOM 而 `.bat` 不能要（但 BOM 只修读入方向，写出仍归控制台代码页）、`Get-Content` 默认 ANSI 读回即永久损坏、控制台代码页 vs 文件真字节、兜底代码被自己的 `except: pass` 吃掉、`core.autocrlf` 静默改字节让哈希校验说谎、"默认编码"是每个客户端各自的默认值而退出码全是 0（读数还会被宿主注入的 `PYTHONUTF8`/`PYTHONIOENCODING` 整体改写） |
 | [git-ref-plumbing-on-windows](skills/git-ref-plumbing-on-windows/SKILL.md) | 绕开正常 checkout 之后要还的债：带斜杠 ref 的旧"被吞"结论已三次未复现（判据保留）、`commit-tree` 索引残留、worktree 满屏 `D` 要分索引动没动两态、对象库损坏的旧判据本身是假阴性 |
 | [github-network-and-api-fallback](skills/github-network-and-api-fallback/SKILL.md) | GitHub 网络分层排障 + REST 兜底：git 不读系统代理、TCP 通而 TLS 挂、Schannel 与 OpenSSL 结论相反、`postBuffer` 500MB OOM、push 静默失败改走 Contents API、逐对象核对远端时的三处假警报 |
