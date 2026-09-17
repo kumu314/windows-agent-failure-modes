@@ -1,6 +1,6 @@
 ---
 name: agent-runtime-boundaries
-description: AI agent 自己的执行环境有哪些硬边界（进程回收、沙箱回环、overlay 临时盘、单命令超时、授权边界、跨会话能力漂移）。后台服务起不来、localhost 连不上、生成的文件下条命令就没了、命令被超时掐断、"我起的进程哪去了"、子代理说做完了但不明之前读。触发词：后台进程、起服务、nohup、&、run_in_background、Start-Process、连不上 127.0.0.1、端口拒连、文件消失、overlay、沙箱、超时被杀、命令太长、一次跑不完、要授权、子代理说完成、备份残留。
+description: AI agent 自己的执行环境有哪些硬边界（进程回收、沙箱回环、overlay 临时盘、单命令超时、授权边界、跨会话能力漂移）。后台服务起不来、localhost 连不上、生成的文件下条命令就没了、命令被超时掐断、"我起的进程哪去了"、子代理说做完了但不明之前读。触发词：后台进程、起服务、nohup、&、run_in_background、Start-Process、连不上 127.0.0.1、端口拒连、文件消失、overlay、沙箱、超时被杀、命令太长、一次跑不完、要授权、子代理说完成、备份残留、派活显示无人认领、unclaimed。
 agent_created: true
 ---
 
@@ -104,6 +104,22 @@ agent_created: true
   - 同族假象：**光连上 MCP 不等于登记成功**——在线列表/心跳往往要等你写下第一条内容才出现，用"它连上了"推断"别人能看见我"会误判。
 - **验证于**：Windows 10.0.26200 · Git Bash `GNU bash 5.2.37(1)-release (x86_64-pc-msys)` · Node v24.18.0（`<Node 安装目录>\node.exe`）· better-sqlite3 ABI 137 · 2026-09-17
 
+## 12. 派活归属存在两个地方，而"看谁在干"的那个视图不读你写进去的那张表
+
+- **现象**（本机实测）：用 `assign <任务> <身份>` 把一张长期卡派给 4 个协作方，四条命令**全部回显成功**（`Assigned #4 to … — notification left in their inbox`），归属表里也确实有 4 行。可是任何一个协作方跑聚合视图 `status` 看"未完成的活"那一栏，这一条显示的仍是 `(unclaimed)`——看起来像没人管。更绕的是同一份数据在另一个视图里是对的：明细看板 `tasks` 显示 `80% ←pi,dsh,trae,workbuddy`。**两次读，两个结论。**
+- **根因**：归属写进**两张地方**，读视图各取一张。`assign()` 落的是多对多的 `task_assignees`（源码里那句是 `INSERT OR IGNORE INTO task_assignees …`），随后**无条件**再调 `message()` 投一条收件箱、`append()` 追加一条时间线；而任务行上的 `claimed_by` 只有 `claim` 会写。聚合视图渲染那行的代码是 `t.claimedBy ? '← ' + t.claimedBy : '(unclaimed)'`——**它压根没查 assignees 表**（同一个包里另有把两处并起来读的函数 `activeAgentsOnTask()`，只是这个视图没用它）。所以不是写失败，是汇总视图漏了一张表。
+- **对策**：① **别把归属字段当送达信号**——派活真正会被对方读到的是它自动投进收件箱的那条 message，送达自查看 `outbox`；② 对外说"谁在做这张卡"时读**明细看板**或直查 `task_assignees`，不要引用聚合视图那一行；③ 想让一张卡有单一持有人，另外走 `claim`（它才写 `claimed_by`，且别人已 claim 时会报 CONFLICT）；④ **重复 assign 修不好显示**：那句是 `OR IGNORE`，重派只会多投一条收件箱 + 多落一条时间线，归属行数不变、显示照旧，而回显仍是"Assigned"——典型的"命令成功但事情没成"。
+- **判定**：
+  ```bash
+  <node> <cli> status | grep -A3 "Open work"    # 聚合视图怎么说
+  <node> <cli> tasks   | grep -i <编号>          # 明细看板怎么说（按编号，别按 key）
+  <py> -c "import sqlite3 as s;print(s.connect('<库目录>/board.db').execute('select agent,assigned_by,assigned_at from task_assignees where task_key=?',('<key>',)).fetchall())"
+  ```
+  - 表里有行、`tasks` 里有 `←名字`、`status` 里却写 `(unclaimed)` → **视图漏表**，不是写失败：不要再补一次 assign，改用 ② 的读法拿真相。
+  - 反例校验（把"我的 key 没出现在输出里"当结论之前必做）：明细看板打印的是**标题不是 key**，`tasks | grep <key>` 必然命中 0 且退出码 1——这是"按列表里没有的字段去 grep"造成的**假阴性**，不是卡丢了。换一条**必然命中**的查询（按编号、或按标题里的一个词）跑一遍，命中了才说明前一条是扫描写错。同族见 `silent-failure-triage §2`。
+  - 顺带一条同源的显示层坑：`inbox` 返回体里的 `readAt` 取的是消息行上的**全局**列，不是本身份的已读台账，所以"我读过没"只看它**有没有出现在列表里**，别看那个字段。
+- **验证于**：Windows 10.0.26200 · Git Bash `GNU bash 5.2.37(1)-release (x86_64-pc-msys)` · Node v24.18.0 · Python 3.12.10 · 2026-09-17
+
 ## 复用信号
 
-"起了又死了""文件不见了""端口拒连""本地操作报网络错""这条命令怎么老被掐""它说做完了""备份怎么被推上去了" → 全部先归到"这是环境边界还是我的逻辑错"，再决定要不要改代码；"MCP 报 -32603 / did not complete" → §11（先读链尾再重试）。
+"起了又死了""文件不见了""端口拒连""本地操作报网络错""这条命令怎么老被掐""它说做完了""备份怎么被推上去了" → 全部先归到"这是环境边界还是我的逻辑错"，再决定要不要改代码；"MCP 报 -32603 / did not complete" → §11（先读链尾再重试）；"派活回显成功但看板上写着没人认领""`(unclaimed)`""我明明 assign 过了""按 key grep 任务列表 grep 不到" → §12（归属存两处 + 视图漏表 + 按不存在的字段 grep 的假阴性）。

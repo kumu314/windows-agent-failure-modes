@@ -30,9 +30,9 @@ cp -r skills/* ~/.claude/skills/
 | [github-network-and-api-fallback](skills/github-network-and-api-fallback/SKILL.md) | GitHub 网络分层排障 + REST 兜底：git 不读系统代理、TCP 通而 TLS 挂、Schannel 与 OpenSSL 结论相反、`postBuffer` 500MB OOM、push 静默失败改走 Contents API、逐对象核对远端时的三处假警报 |
 | [python-silent-data-errors](skills/python-silent-data-errors/SKILL.md) | Python 读写数据的不报错错误：`open()` 默认编码不是 UTF-8、`csv.writer` 少 `newline=''` 每行夹空行、pandas 3.x 起 `dtype == object` 恒假、`to_datetime` 静默吞值 |
 | [runtime-resolution-and-abi](skills/runtime-resolution-and-abi/SKILL.md) | 到底哪个解释器在跑：App Execution Alias 存根、`py -0p` 列出不存在的路径、原生模块 ABI 不匹配、PATH 顺序随 shell 变、venv 没激活而 pip 装到全局、PowerShell 执行策略让脚本根本没跑起来 |
-| [agent-runtime-boundaries](skills/agent-runtime-boundaries/SKILL.md) | Agent 自己的环境边界：调用结束回收全部子进程、独立回环与 overlay 临时盘、本地操作报外联错、单命令超时、长任务断点续传、越界写入是等待授权不是失败、共享库的写通道报内部错时先读链尾再重试 |
-| [chromium-cdp-on-windows](skills/chromium-cdp-on-windows/SKILL.md) | CDP 操控真实 Chrome：默认 profile 禁调试端口、Chrome 不继承环境代理、⛔关掉最后一个 page 会让浏览器整体退出、target 堆积致握手挂起、Cookie 继承的前置顺序 |
-| [stale-output-layers](skills/stale-output-layers/SKILL.md) | "改了没生效"的五层定位：源码 / 构建 / 服务 / 渲染 / 部署，每层一条独立判据；Service Worker 清理的两个顺序约束、备份放项目内会弄坏构建 |
+| [agent-runtime-boundaries](skills/agent-runtime-boundaries/SKILL.md) | Agent 自己的环境边界：调用结束回收全部子进程、独立回环与 overlay 临时盘、本地操作报外联错、单命令超时、长任务断点续传、越界写入是等待授权不是失败、共享库的写通道报内部错时先读链尾再重试、派活回显成功而聚合视图仍显示 `(unclaimed)` |
+| [chromium-cdp-on-windows](skills/chromium-cdp-on-windows/SKILL.md) | CDP 操控真实 Chrome：默认 profile 禁调试端口、Chrome 不继承环境代理、⛔关掉最后一个 page 会让浏览器整体退出、target 堆积致握手挂起、Cookie 继承的前置顺序、要人参与的流程不能由 agent 起进程 |
+| [stale-output-layers](skills/stale-output-layers/SKILL.md) | "改了没生效"的五层定位：源码 / 构建 / 服务 / 渲染 / 部署，每层一条独立判据；Service Worker 清理的两个顺序约束、备份放项目内会弄坏构建、收尾要一次真实渲染证据 |
 
 ## 结构约定
 
