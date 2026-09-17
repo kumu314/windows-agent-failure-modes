@@ -19,6 +19,8 @@ agent_created: true
   python -c "open(p,'rb').read().decode('utf-8')[:40]"                    # 抛异常 = 文件真不是 UTF-8
   ```
   同一失效也解释"我的脚本在同事 Linux 上跑结果不一样"：**默认编码随机器变，显式编码不随机器变**。
+- **复测环境交互（2026-09-18）**：本机设了 `PYTHONUTF8=1`（另有 `PYTHONIOENCODING=utf-8`）⇒ `sys.flags.utf8_mode=1`、`getpreferredencoding(False)` 报 **utf-8**，本节陷阱**不复现**。判定前先跑 `python -c "import sys;print(sys.flags.utf8_mode)"` 钉住这一点；要复现 cp936 一侧用 `python -X utf8=0`（实测报 **cp936**，写出的中文变 GBK 字节 `b'\xd6\xd0\xce\xc4\xb2\xe2\xca\xd4'`、utf-8 读侧 `UnicodeDecodeError`）。环境变量的完整分叉见 windows-text-encoding §8。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · 2026-09-18
 
 ## 2. `csv.writer` 不加 `newline=''`：每一行后面多一个空行
 
@@ -26,6 +28,8 @@ agent_created: true
 - **根因**：文本模式把 `\n` 翻译为 `\r\n`，而 csv 自己已经写了 `\r\n` → 双重翻译。
 - **对策**：写 `open(p,'w',newline='',encoding='utf-8')`；读 `open(p,newline='',encoding='utf-8-sig')`。
 - **判定**：`open(p,'rb').read()` 看真实字节里有没有 `\r\r\n`。有，就是这一条；不要靠"看起来行数对了"。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · 2026-09-18
+- **复测确认（2026-09-18）**：文本模式写两行 CSV 后真实字节为 `b'a,b\r\r\n1,2\r\r\n'`——`\r\r\n` 命中，原结论成立。
 
 ## 3. `dtype == object` 判断在新版 pandas 上永远为假
 
@@ -37,6 +41,8 @@ agent_created: true
   if df[c].dtype == object or pdt.is_object_dtype(df[c]) or pdt.is_string_dtype(df[c]): ...
   ```
 - **判定**：`print(repr(df[c].dtype), pd.__version__)` 一行就把环境钉死。**任何"清洗没生效"先跑这行**，别看代码逻辑。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · pandas 3.0.5 · 2026-09-18
+- **复测确认（2026-09-18）**：pandas 3.0.5 上 `pd.Series(['a','b']).dtype` 为 `<StringDtype(storage='python', na_value=nan)>`，`== object` **False**、`is_object_dtype` False、`is_string_dtype` True——原结论成立。
 
 ## 4. 混格式日期列：第一种格式胜出，其余静默变 `NaT`
 
@@ -44,6 +50,8 @@ agent_created: true
 - **根因**：`to_datetime` 一旦推断出格式就锁死它；`errors='coerce'` 又把"解析失败"从异常降格成缺失值。中文日期（`2026年1月16日`）与点分隔（`2026.1.3`）pandas 原生不认。
 - **对策**：三步——① 先正则规整成统一形式（`2026年1月16日`/`2026.1.3` → `2026-01-16`/`2026-01-03`）；② `pd.to_datetime(s, errors='coerce', format='mixed')`，外面套 `except (TypeError, ValueError)` 兜住没有 `format='mixed'` 的老版本；③ 对"原始非空但解析后为空"的残余值逐个再试一次。
 - **判定（关键，别省）**：算两个数并打印——`原始非空计数` 与 `解析后 notna 计数`。**只要不相等就是有值被 coerce 吃掉了**。顺带注意：coerce 后的 `NaT` 和本来就空的 `NaN` 不可分辨，所以这个差必须在 coerce 那一刻记下，事后无从追溯。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · pandas 3.0.5 · 2026-09-18
+- **复测确认（2026-09-18）**：`['2026/1/3','2026-01-15','2026年1月16日']` 直接 `to_datetime(errors='coerce')` ⇒ 原始非空 3 / 解析后 notna **1**（只剩第一种格式）；改 `format='mixed'` ⇒ 2（`2026年1月16日` 中文日期仍不认，需先按对策①正则规整）。原结论成立。
 
 ## 5. `to_excel` 写出去的全空行，`read_excel` 读不回来
 
@@ -51,6 +59,8 @@ agent_created: true
 - **根因**：Excel 读回时末尾全空行会被丢掉——数据在写入环节就没了，与被测逻辑无关。
 - **对策**：**测试用空行放中间，不放末尾**（夹在两条有内容的记录之间），或写完立刻断言行数与预期一致。
 - **判定**：写完先读回来 `len(df)` 比一下，再生成断言。造数据这一步也要 round-trip，否则测的是"读取器的容忍度"。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · pandas 3.0.5 · openpyxl 3.1.5 · 2026-09-18
+- **复测确认（2026-09-18）**：中间空行 written 3 → read back **3**（保留）；末尾空行 written 4 → read back **2**（被丢掉）——原结论成立，测试数据造末尾空行等于白造。
 
 ## 6. `NaN` / 空串 / 字符串 `"nan"` 是三种不同的东西
 
@@ -58,6 +68,8 @@ agent_created: true
 - **根因**：`astype(str)` 会把缺失值转成**看起来像数据的文本**，一旦做了这一步，缺失信息就永久丢失。
 - **对策**：需要文本化时显式指定占位（`df[col].fillna('')` 再 `astype(str)`），并在归一化函数里把 `'nan'/'None'/'NaN'` 一并视为空；下游若按"非空即有效"过滤，就会把这三类字面量当真实值收下。
 - **判定**：清洗前后各打印一次 `col.isna().sum()` 与 `(col.astype(str).str.strip()=='' ).sum()`，两个数都记下来；只记一个就无法区分"真没了"和"变成字符串了"。
+- **复测环境差异（2026-09-18 · pandas 3.0.5）**：`pd.Series(['a',np.nan]).astype(str)` 后 NaN **保留为缺失值**（元素类型 str/float 混合、`isna().sum()` 仍为 **1**），**不再**变成字符串 `"nan"`——"NaN 被 astype(str) 变成 'nan' 文本"这一支在 3.x **不复现**；而字面量 `"nan"` 字符串仍是独立第三种值（前后都不 isna，会被"非空即有效"的过滤收下）。原结论按 2.x / object dtype 环境继续生效，两版并存。实测：`['a','',np.nan,'nan']` ⇒ `isna` 1、空串 1；`replace('', None)` 后 `isna` 升至 2。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · pandas 3.0.5 · 2026-09-18
 
 ## 7. 写结果给别人读：把"我怎么写的"一起交付
 
@@ -65,6 +77,8 @@ agent_created: true
 - **根因**：三类默认值共同造成——`to_csv` 未加 `encoding='utf-8-sig'`（Excel 双击打开时把 UTF-8 首列中文名解坏）、未加 `index=False`（多出一列无名索引）、以及 §1/§2 的编码与换行。
 - **对策**：交付用 CSV 固定 `df.to_csv(p, index=False, encoding='utf-8-sig', newline='')`；Excel 用户为主才用 `utf-8-sig`（有 BOM 才认得出 UTF-8），纯程序消费用无 BOM UTF-8，并在交付说明里写清是哪一种。
 - **判定**：`open(p,'rb').read(3)` 是 `b'\xef\xbb\xbf'` = 带 BOM；再看首行字节而不是看表格软件，表格软件会替你掩盖所有这些问题。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · pandas 3.0.5 · 2026-09-18
+- **复测确认（2026-09-18）**：`to_csv(encoding='utf-8-sig')` 首 3 字节 `b'\xef\xbb\xbf'`；`encoding='utf-8'` 首 3 字节 `b'\xe5\x88\x97'`（无 BOM）；不写 `index=False` 时首两行多出 `,列` / `0,1`——原结论全部成立。
 
 ## 8. 上面这些的元问题：环境不写在代码里就会漂
 
@@ -77,6 +91,8 @@ agent_created: true
   py -0p          # 列出启动器认为存在的全部版本
   ```
   `py -0p` 里出现的路径**可能根本不存在**（卸载残留的注册项），所以它只能当线索不能当结论——真正判据是 `<那个路径> -c "print(1)"` 的退出码。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · pandas 3.0.5 · 2026-09-18
+- **复测确认（2026-09-18）**：`py -0p` 列出 3 项（3.13、3.12*、uv 自带），其中 3.13 项路径执行 `-c "print(1)"` 实测**退出码 127**（路径不存在）、3.12 项退出码 0——"启动器列表含死路径"当场实证。
 
 ## 复用信号
 
