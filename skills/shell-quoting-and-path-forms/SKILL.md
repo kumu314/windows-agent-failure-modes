@@ -1,6 +1,6 @@
 ---
 name: shell-quoting-and-path-forms
-description: Windows 上把文本和路径安全送进 shell 的失效模式。用 heredoc 写脚本、用 python -c 传长文本、往文件追加含反引号或中文标点的正文、Git Bash 里路径写法报错、taskkill/sc/reg 等原生命令传参、含空格目录名传给第三方 CLI 之前先读这条。触发词：heredoc、反斜杠被吞、反引号消失、命令替换、全角符号、cd /d、taskkill 无效、路径被拆开、8.3 短路径、/tmp 找不到、Glob 返回空、md5 对不上、哈希假不等。
+description: Windows 上把文本和路径安全送进 shell 的失效模式。用 heredoc 写脚本、用 python -c 传长文本、往文件追加含反引号或中文标点的正文、Git Bash 里路径写法报错、taskkill/sc/reg 等原生命令传参、含空格目录名传给第三方 CLI 之前先读这条。触发词：heredoc、反斜杠被吞、反引号消失、命令替换、全角符号、cd /d、taskkill 无效、路径被拆开、8.3 短路径、/tmp 找不到、Glob 返回空、md5 对不上、哈希假不等、MAX_PATH、260 上限、长路径看不见。
 agent_created: true
 ---
 
@@ -83,6 +83,27 @@ agent_created: true
   ```
   非要用变量比，就把换行补回去再哈希：`printf '%s\n' "$V" | md5sum`（但仍不如 `diff` 直观，`diff` 还能指出差在哪一行）。
 - **判定**：① 哈希等于 `d41d8cd98f00b204e9800998ecf8427e` ⇒ 是**空输入**，问题在抓取不在内容（按 `silent-failure-triage §2` 先证明取值通道有效）；② 两侧字节数只差 1 且文件尾是换行 ⇒ 命中本条；③ `wc -c` 两侧相同 + `diff` 为空，才算真一致。
+
+## 11. 路径总长到 260 字符：一些工具照常成功，另一些连"文件存在"都看不见
+
+- **现象**（本机实测，绝对路径长度逐字符可控）：把目录嵌深到**总长 260 字符以上**后，同一批工具分成两组——
+  - **照常成功**：Node `fs.writeFileSync` / `fs.readFileSync`（300 字符路径退出码 **0**，读回 5 字节）、Git Bash 的 `cp` / `>` 重定向 / `wc -c`（300 字符退出码 **0**、报出字节数）。
+  - **直接失败**：Python `open()` / `os.stat()`、PowerShell `Get-Content` 在 **260 起**一律 `FileNotFoundError(2, 'No such file or directory')` / `ItemNotFoundException`；`os.path.exists()` 返回 `False`；`cmd copy` 报 `系统找不到指定的路径`；`git add` 退出码 **128**（`error: open("…")`）。
+  - **最容易读反的一档**：`cmd copy` 在**目标**路径越界时打印 `已复制         0 个文件。`、退出码 **1**——句式像成功、数字是 0；`pwsh New-Item -Directory` 到总长 250 就报 `完全限定文件名必须少于 260 个字符，并且目录名必须少于 248 个字符`。
+  - 后果是本族最典型的坏结论：Node/bash 明明把文件写出来了，Python 一句 `False` 就让你判"没生成 / 目录是空的"，然后开始重建（与 `silent-failure-triage §2`、本文件 §9 同族）。
+- **根因**：`LongPathsEnabled` 未开启时（本机实测值 `0`），不带 `\\?\` 前缀的 Win32 路径要过 MAX_PATH 检查，**实测可用上限是 259 字符**（260 起必失败）；**目录路径上限 247 字符**（248 起 `文件名或扩展名太长`）；**进程工作目录上限 258 字符**（259 起 `CreateProcess` 抛 `NotADirectoryError`）。官方的 260 / 248 是含结尾 NUL 的口径，所以能落地的最长值比它小 1。Node 的 libuv 与 MSYS coreutils 自己补前缀，因此不受这条限制——于是"甲建得出、乙看不见"。**相对路径不是绕法**：API 仍按 `cwd + 相对名` 拼成绝对路径再判，实测 cwd 长 242 时相对名 40 → 解析后 264 → 照样失败。
+- **对策**：① 确实要越界时，命令里显式写 `\\?\<绝对路径>`——实测 Python、PowerShell 接受；`cmd` 报 `指定的路径无效。`、git 报 `fatal: Invalid path '//?/…'`（前缀会被 MSYS 改写成 `//?/`，所以 git 侧只能靠缩短路径）；② **`\\?\` 不能当进程工作目录**：`CreateProcess` 收到它会静默把 cwd 降级为 `<盘>:\Windows`、命令退出码 **0**，此后所有相对路径操作都落在系统目录里；③ 把长路径当**结构信号**——它通常说明中间产物该挪到浅目录；④ 临时救急可换 8.3 短名（`cmd /c "for %I in (…) do @echo %~sI"`，见本文件 §8），实测把 260 压到 133、300 压到 151、400 压到 196，且短名可被 Python 正常 `open()`。
+- **判定**：同一文件过三条通道比对，出现分歧即命中本节：
+
+  ```bash
+  P="<盘>:\<深>\<深>\<文件>"                            # 绝对路径
+  printf 'len=%s\n' "$(printf '%s' "$P" | wc -c)"       # ≥260 即落在本节范围
+  python -c "import os,sys;print('py  ',os.path.exists(sys.argv[1]))" "$P"
+  node   -e "console.log('node',require('fs').existsSync(process.argv[1]))" "$P"
+  ```
+
+  `node` 为 `true` 而 `py` 为 `False` ⇒ 文件真实存在、只是 Python 看不见 ⇒ 命中本条，**不要**据此重跑生成。需要贴边判定时按这三对阈值卡：259 成功 / 260 失败（文件）、247 / 248（目录）、258 / 259（工作目录）。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · Git 2.53.0.windows.2 · Node v24.18.0 · Python 3.12.10 · PowerShell 5.1.26100.9444 · 2026-09-17
 
 ## 12. junction 的"是链接"每个工具答得不一样；删错的命令是 `del /f /s /q`
 
