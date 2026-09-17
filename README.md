@@ -22,7 +22,7 @@ cp -r skills/* ~/.claude/skills/
 
 | Skill | 一句话 |
 |---|---|
-| [shell-quoting-and-path-forms](skills/shell-quoting-and-path-forms/SKILL.md) | Git Bash/MSYS 的引号与路径形态：命令替换吃掉反引号、heredoc 吞反斜杠、`/d/` 与 `/tmp` 原生程序不认、`//F` 被重写后静默失败、含空格路径被拆成多参数 |
+| [shell-quoting-and-path-forms](skills/shell-quoting-and-path-forms/SKILL.md) | Git Bash/MSYS 的引号与路径形态：命令替换吃掉反引号、heredoc 吞反斜杠、`/d/` 与 `/tmp` 原生程序不认、`//F` 被重写后静默失败、含空格路径被拆成多参数、`$(…)` 剥掉尾换行造成哈希假不等 |
 | [silent-failure-triage](skills/silent-failure-triage/SKILL.md) | "退出码 0 但没做成"的总账：管道让 `$?` 说谎、空输出的三种成因（含下游工具没装时字段变空串而退出码仍是 0）、假同步与假陈旧、计划任务注册了却永不运行、解释器"存在"是 0 字节壳 |
 | [windows-text-encoding](skills/windows-text-encoding/SKILL.md) | 编码与 BOM：`.ps1` 要 BOM 而 `.bat` 不能要、`Get-Content` 默认 ANSI 读回即永久损坏、控制台代码页 vs 文件真字节、兜底代码被自己的 `except: pass` 吃掉 |
 | [git-ref-plumbing-on-windows](skills/git-ref-plumbing-on-windows/SKILL.md) | 绕开正常 checkout 之后要还的债：MSYS 吞掉带斜杠的 ref 写入、`commit-tree` 索引残留、worktree 凭空删文件、对象库损坏别增量救 |
