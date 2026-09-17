@@ -1,0 +1,4 @@
+# 本仓库全部是文本资产，统一 LF。
+# Windows 上 Git for Windows 的 system config 默认 core.autocrlf=true，
+# 不设这一行的话每次 git add 都会静默改写工作区字节（本仓库首推时吐了 12 条 CRLF 警告）。
+* text=auto eol=lf

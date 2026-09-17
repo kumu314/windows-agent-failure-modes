@@ -106,6 +106,25 @@ gh api --method PUT repos/<owner>/<repo>/contents/<path> \
 - **403 的响应体里通常写着答案**（例：`Upgrade to GitHub Pro or make this repository public to enable this feature.` = 该功能私有库不开放）。只看状态码就重试，等于把一句话能定位的问题重跑十遍。同理，`422` 十有八九是 **SHA 少写/多写一位**——SHA 永远动态取（`git rev-parse HEAD` 或上一步 API 返回值），禁止手敲短 SHA 拼长。
 - **"推成功 ≠ 可访问"**：交付物的在线链接在仓库仍是 private 时对外是 404。要么改可见性（这是对外的动作，先取得同意），要么别声称链接可用。
 
+## 8. 逐对象核对"远端 == 本地"：三处会自己造出假警报的地方
+
+- **现象**（本机实测，同一分钟内连犯两次）：推完之后做对象级核对，`git rev-parse HEAD^{tree}` 得 `4eb2a99…`，`gh api repos/<owner>/<repo>/git/trees/HEAD --jq .sha` 得 `6038fd2…` → 判"远端树和本地不一样"，准备重推。第二次改用 `git ls-tree -r` 与 API 的 `.tree[]` 逐行比，又报满屏差异。两次都是**假警报**，而且都长得像"发现了真问题"。
+- **根因 / 对策**：三个互相独立的坑叠在一起：
+  1. **`/git/trees/{ref}` 的 `.sha` 回显的是你传入的 ref 所解析到的对象，不是它返回的那棵树的 SHA。** 传 `HEAD`（或 commit SHA）→ `.sha` 就是 **commit SHA**；要 tree SHA 必须传 `HEAD^{tree}`（URL 里写成 `HEAD%5E%7Btree%7D`），或者改读 `commits/{ref}` 的 `.commit.tree.sha`。
+  2. **条目数天生不等**：`git ls-tree -r` 只列 blob，API `?recursive=1` 把**目录级的 tree 条目**也列出来。13 个文件 + 11 个目录条目 = API 给 24 行，于是"远端比本地多 11 条"纯属口径差。对齐方式二选一：`git ls-tree -r -t` ↔ `.tree[]` 全量；`git ls-tree -r` ↔ `.tree[] | select(.type=="blob")`。
+  3. **分隔符不同**：`git ls-tree` 的行格式是 `mode SP type SP sha TAB path`——SHA 与路径之间是 **TAB**，而 `--jq` 拼出来的是空格 → 原始 `diff` 永远不等。比对前先 `tr '\t' ' '`。
+- **对策（一条命令同时取两侧，让 diff 自己说话）**：
+  ```bash
+  R=<owner>/<repo>
+  gh api "repos/$R/git/trees/HEAD%5E%7Btree%7D?recursive=1" \
+    --jq '.tree[] | "\(.mode) \(.type) \(.sha) \(.path)"' > D:/tmp_api.txt
+  git ls-tree -r -t HEAD | tr '\t' ' ' > D:/tmp_git.txt
+  diff D:/tmp_git.txt D:/tmp_api.txt && echo IDENTICAL
+  ```
+  两侧都取 **full SHA**，别拿 7 位短 SHA 参与比对。
+- **判定**：① 上面 `diff` 为空且本地 `git cat-file -t <远端返回的 commit.sha>` 不报错 = 真一致；② 报"少文件"之前先读返回体的 **`.truncated`**——大仓库的 `recursive=1` 会截断，`truncated: true` 时"远端少了几条"是**接口没返回**，不是仓库真缺；③ 只有当换掉 `tr '\t' ' '` 之后 diff 才变红，才说明确实是内容差异而不是分隔符。
+- **附带一条同族**：这台机器的 Git Bash 里**没有外部 `jq`**。把取值写成 `echo ".sha : $(curl -s … | jq -r .sha)"` 时，输出是**空串**而 `$?` 是 **0**（实测：改成 `v=$(jq …)` 的赋值形式才露出 `127`），于是 5 个字段全空，看起来完全像"API 没返回这些字段"。改用 `gh api --jq`（自带表达式引擎、不依赖外部 `jq`）后一次就取到了值。泛化规则见 `silent-failure-triage §2`。
+
 ## 复用信号
 
-- "浏览器/gh 能用只有 git 不行" → §1；"端口能连但请求挂" → §2；"这个客户端说不通行另一个说不通" → §3；"OOM 的字节数像配置的默认值" → §4；"push 不报错也不成功" → §5 → §6；"每次都是 401/422" → §7。
+- "浏览器/gh 能用只有 git 不行" → §1；"端口能连但请求挂" → §2；"这个客户端说不通行另一个说不通" → §3；"OOM 的字节数像配置的默认值" → §4；"push 不报错也不成功" → §5 → §6；"每次都是 401/422" → §7；"核对时两个 SHA 对不上 / 条数差一截" → §8。
