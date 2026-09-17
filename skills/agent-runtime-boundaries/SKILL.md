@@ -49,8 +49,16 @@ agent_created: true
 ## 6. 环境能力会跨会话漂移，别用上一次的清单推断这一次
 
 - **现象**：昨天能 push 今天 `Connection reset`；同一台机器白天判"沙箱可非交互 push"，当晚被证伪；给 MCP 服务加了新工具，当前会话里却看不见（要重启客户端才加载）；换个 shell，PATH 解析到的解释器就不一样（见 runtime-resolution-and-abi）。
+- **根因**：agent 的运行边界是**按调用/按会话**发的，不是按机器发的——网络策略、凭证、PATH、已挂载的 MCP 工具面都可能在你两次命令之间被人改过或根本没继承上一次的结果。
 - **对策**：**环境能力每次实测**，一次探测 3 秒，误判一次赔一轮。把探测结果写进当次结论里（"刚才测过：API 通、push 不通"），别写成"这个环境能 push"。
 - **附带**：新会话/首轮可能工具面更小（未挂上的 MCP、未授权的能力）。工具不在时先确认是否只是未加载，而不是断言"本环境不支持"。
+- **判定**：开工第一件事跑固定三探，输出直接抄进当次结论，环境能力只有"刚才测过"这一种证据：
+  ```bash
+  curl -s -m 8 -o /dev/null -w 'api=%{http_code}\n' https://api.github.com   # 取不到三位数 = 外连未通
+  python -c "import socket;print('tcp=',bool(socket.create_connection(('github.com',443),timeout=8)))"
+  for c in git node python curl; do printf '%s ' "$c"; command -v "$c" || echo MISSING; done   # 必须逐个点名
+  ```
+  逐条 `command -v` 是硬要求：`command -v a b c` 只要有一个在就返回 0（见 `silent-failure-triage §2`）。MCP 工具"加了却看不见"的判定不在终端里：查**当前会话**的工具清单里有没有那个名字，没有就按未加载处理（重启客户端），别据此断言"本环境不支持"。
 
 ## 7. 越出工作区的写入：那是等待授权，不是失败
 
