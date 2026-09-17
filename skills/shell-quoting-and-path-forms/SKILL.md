@@ -105,22 +105,28 @@ agent_created: true
   `node` 为 `true` 而 `py` 为 `False` ⇒ 文件真实存在、只是 Python 看不见 ⇒ 命中本条，**不要**据此重跑生成。需要贴边判定时按这三对阈值卡：259 成功 / 260 失败（文件）、247 / 248（目录）、258 / 259（工作目录）。
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · Git 2.53.0.windows.2 · Node v24.18.0 · Python 3.12.10 · PowerShell 5.1.26100.9444 · 2026-09-17
 
-## 12. junction 的"是链接"每个工具答得不一样；删错的命令是 `del /f /s /q`
+## 12. junction 的"是链接"每个工具答得不一样；吃掉目标的是尾反斜杠和 `del /f /s /q`
 
 - **现象**（本机实测；样本均为 junction：`%USERPROFILE%\.trae-cn\skills` → `<工作区>\trae-data\skills`、`%USERPROFILE%\.agents\skills` → `<工作区>\agentskills`）：
   - PowerShell 5.1 `(Get-Item -Force <路径>).LinkType` → 这两个都是 `Junction`，`.Target` 是目标绝对路径；普通目录（`<工作区>\agentskills`）返回**空**。
-  - Git Bash：`[ -L <路径> ]` 对 junction **恒为 no**（`-d` 为 yes）。
-  - Python 3.12：`os.path.islink()` 同样 False；而 `pathlib.Path.is_junction()` 为 True。
+  - Git Bash：`[ -L <链接> ]` 对 junction 报 **yes**（反斜杠原生写法与 `/d/…` POSIX 写法都 yes）。但**路径尾部多一个 `/` 或 `\` 就立刻变 no**——尾斜杠会先解析进目录再判断，答的是"这个目录不是链接"。同一个链接、同一次运行，两种写法答案相反：这里出错的是**路径形态**，不是 MSYS 不认 junction。
+  - Python 3.12：`os.path.islink()` False；而 `pathlib.Path.is_junction()` True。
   - Node 24：`lstat().isSymbolicLink()` **两种都出现过**——对上面两个 junction 是 true；对系统自带的 `%USERPROFILE%\AppData\Local\Application Data`（junction → `...\AppData\Local`）**是 false**。别把 `isSymbolicLink()` 当裁判。
-- **根因**：junction 是 NTFS 重解析点（`fsutil reparsepoint query` 报 `Tag value: 0xa0000003`），Windows 对使用者透明；各工具链按自己的模型实现：MSYS `test -L` 与 Python `os.path.islink()` 只认另一种 tag，所以对 junction 一律说"不是链接"。**说"不是链接"的后果不是识别失败，是被当成普通目录去遍历和删除。**
+- **根因**：junction 是 NTFS 重解析点（`fsutil reparsepoint query` 报 `Tag value: 0xa0000003`），与符号链接是**另一个 tag**，Windows 对使用者透明；各工具链按自己的模型实现，所以答案分叉：Python `os.path.islink()` 只认符号链接那个 tag，对 junction 一律 False；MSYS 会把 mount-point tag 当链接，所以裸路径答 yes——但任何"先解析再判断"的写法（尾斜杠、`/…/.`、`Path.resolve()` 之后再问）拿到的都是解析后的普通目录，于是回答 no。**no 不一定是"认不出链接"，也可能是"根本还没看到链接"；两者后果相同：被当成普通目录去遍历和删除。**
 - **对策**：
   - 识别一律读原始属性，别信包装函数：`$i=Get-Item -Force -LiteralPath <路径>; $i.LinkType`、`$i.Attributes -match 'ReparsePoint'`、`fsutil reparsepoint query <路径>`。
   - 要"看最终落到哪"就用会解析的：Node `fs.realpathSync()`、Python `Path.resolve()`；再拿 `os.path.islink()` / `is_junction()` 判断中间有没有链接层。
-  - 删链接前先确认它**本身是**重解析点；删除只准 `rmdir "<链接>"`（或 `Remove-Item -LiteralPath <链接> -Recurse -Force`）。
-  - **禁止**对链接用 `del /f /s /q "<链接>"`、`rmdir /s /q "<链接>"`、`rd /s /q "<链接>"`——这些会穿透进目标，把目标里的内容删掉，**退出码 0**，链接本身反而还在（实测：`del /f /s /q` 之后 `linkGone=false`，目标里的文件已消失）。这就是"删链接把别人数据删了"的真身。
+  - 删链接前先确认它**本身是**重解析点；删除只用 `rmdir "<链接>"`（不带 `/s`）或 `Remove-Item -LiteralPath "<链接>" -Recurse -Force`——后者实测五种写法（带/不带尾反斜杠、`-LiteralPath`、`-Path`、目标里有只读文件）都是**链接没了、目标里的文件全在**，可以放心用。
+  - **尾反斜杠是这里的真实开关**：同一条 `rmdir /s /q`，写 `"<链接>"` 只删链接，写成 `"<链接>\"` 就**穿透删掉目标里的内容**（两轮独立运行、`rmdir /s /q` 与 `rd /s /q` 两种写法都复现，链接与目标目录还在原地、里面已空）。`rmdir "<链接>\"` 不带 `/s` 又安全。也就是说：**危险不是 `/s /q` 这个参数组合，而是"路径以分隔符结尾 ⇒ 命令进到目标里面去删"**。
+  - **无条件禁止**的是 `del /f /s /q "<链接>"`：不带尾反斜杠也照样穿透，退出码 0、打印"删除文件 - …"、链接本身反而还在（`linkGone=false` 而目标里的文件已消失，三次独立复现）。这就是"删链接把别人数据删了"的真身。
   - 嵌套情形要当心：`%USERPROFILE%\.codex` 是 junction → `<工作区>\codex`；但 `.codex\skills` 不是重解析点（`fsutil` 报 `文件或目录不是重解析点`、`LinkType` 空），它是**穿过**上层 junction 落在目标里的真目录——此时 PowerShell 的 `[string] $i.Target` 还能给出一个看起来合法、实际不存在的前缀路径（它给的是 `C:\<工作区名>\codex\skills`，而该路径 `Test-Path` 为 false；Node `realpathSync` 给的是 `<工作区>\codex\skills`）。**LinkType 为空时就不要读 Target。**
   - git：把 junction 放进工作树，`core.symlinks=false` 管不了它，Git 会把目标整棵树当普通内容——实测 `git add link` 后 `git status` 是 `A  link/file0.txt`（目标里 4 个文件全部入库）；跨副本仓库里一个 junction 就能把几百 MB 拉进提交。
   - 通过 junction 进仓库目录（`cd link && git …`、`git -C "<junction>"`、Node `spawnSync(..., {cwd})`）都是**正常解析到真身**的，`rev-parse --show-toplevel` 返回真实路径，不必绕开。
-- **判定**：① 识别：`fsutil reparsepoint query <路径>` 退出码 0 且输出含 `0xa0000003` ⇒ 是 junction（普通目录 ⇒ 退出码 1、`文件或目录不是重解析点`）；② `Get-Item -Force <路径>` 的 `LinkType` 等于 `Junction` ⇒ 是链接，`Target` 可读；③ 删除安全性，用一次抛弃型实测证明：`mklink /J tgt-lnk tgt` → 写入 `tgt\keep.txt` → `rmdir "tgt-lnk"` ⇒ 链接没了、`tgt\keep.txt` 还在；换 `del /f /s /q "tgt-lnk"` ⇒ 打印"删除文件 - …"、退出码 0、但 `tgt\keep.txt` 已不存在。**这两种结果的差别就是本节的判定标准。**
-  - 附两条同族坑：`dir /al` 在"父目录没有重解析点"时退出码是 **1**、stderr 为 `File Not Found`——与"路径不存在"完全同形，别用它判断链接是否存在；PowerShell 5.1 的 `Remove-Item "<junction>"`（不带 `-Recurse`）删不掉链接，只报 `未能找到路径…` / `Cannot find path … because it does not exist`、退出码 1、链接还在（PowerShell 7 行为随版本有差异，本机未测）。
-- **验证于**：Windows 11 家庭中文版 10.0.26200 · PowerShell 5.1.26100.9444 · Git Bash 5.2.37（git 2.53.0.windows.2）· Python 3.12.10 · Node v24.18.0 · 2026-09-17
+- **判定**：① 识别：`fsutil reparsepoint query <路径>` 退出码 0 且输出含 `0xa0000003` ⇒ 是 junction（普通目录 ⇒ 退出码 1、`文件或目录不是重解析点`）；② `Get-Item -Force <路径>` 的 `LinkType` 等于 `Junction` ⇒ 是链接，`Target` 可读；③ 删除安全性，用一次抛弃型实测证明（只在一次性 scratch 目录里做，目标自己造）：建 `tgt\keep.txt` 与 `tgt\sub\deep.txt`，`mklink /J lnk tgt`，然后**同一命令两种写法各跑一遍**——
+  ```bat
+  rmdir /s /q "<scratch>\a\lnk"      :: 链接没了，a\tgt\keep.txt 与 sub\deep.txt 都还在
+  rmdir /s /q "<scratch>\b\lnk\"     :: 链接没了，b\tgt 目录还在但内容已全被删空
+  ```
+  两种写法结果不同 ⇒ 命中本条（尾分隔符才是开关）；`del /f /s /q "<scratch>\c\lnk"` ⇒ 打印"删除文件 - …"、退出码 0、`c\lnk` 仍在、`c\tgt\keep.txt` 已消失。**"退出码 0 + 目标内容消失"这一对就是本节的判定标准。**
+  - 附两条同族坑：`dir /al` 在"父目录没有重解析点"时退出码是 **1**、stderr 为 `File Not Found`——与"路径不存在"完全同形，别用它判断链接是否存在；PowerShell 5.1 的 `Remove-Item "<junction>"`（不带 `-Recurse`）分两态：目标**为空**时直接删成功、退出码 0；目标**非空**时是一条**强制确认**（"项具有子项…"），`-Confirm:$false` 和 `-Force` 都压不住，非交互调用（`-NonInteractive`）下变成 `InvalidOperation`「在非交互模式下…提示不可用」而**链接与目标都原样保留**——想安静删掉就得给 `-Recurse`。（曾记为"报 `Cannot find path …`、退出码 1"，复跑与悬空 junction 两种情形都没复现出这条文案，已按实测改写；PowerShell 7 未测。）
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · PowerShell 5.1.26100.9444 · Git Bash 5.2.37（MSYS 3.6.6-1cdd4371 / git 2.53.0.windows.2）· cmd 10.0 · Python 3.12.10 · Node v24.18.0 · 2026-09-17 首发，2026-09-18 独立复跑并更正 `[ -L ]`、`Remove-Item`、`rmdir /s /q` 三条
