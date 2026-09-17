@@ -8,24 +8,24 @@ agent_created: true
 
 本族的高频特征：**git 报 exit 0，坏的是 `.git` 里的状态**，而状态错误要到下一次操作才暴露，那时已经很难归因。凡动过 plumbing，就当自己欠一次验证。
 
-## 1. MSYS 把带斜杠的 ref 吞掉（exit 0，ref 不存在）
+## 1. 带斜杠的 ref 写入：旧版记为"MSYS 吞掉"，本机同版本三次未复现 ⇒ 别当既定行为，但判据要留着
 
-- **现象**：`git update-ref refs/heads/agent/writer/sec1-sec2 <sha>` 或 `git checkout -B <含斜杠分支>` 返回 0，但 `.git/refs/heads/...` 不存在，HEAD 变成 unborn；objects、工作区文件写入都正常，**只有 ref 这一层回滚了**。全新 clone 也稳定复现。
-- **根因**：MSYS 的路径转换把 `a/b/c` 形态的 ref 当文件系统路径处理。
-- **对策（两个方向）**：
+- **原始事故（现已无法复现，保留以备对账）**：`git update-ref refs/heads/agent/writer/<名> <sha>` 或 `git checkout -B <含斜杠分支>` 返回 0，而 `.git/refs/heads/...` 不存在、HEAD 变 unborn；objects 与工作区写入都正常，只有 ref 这一层回滚。
+- **复测取值（同机同版本，2026-09-17 两轮 + 2026-09-18 一轮）**：`update-ref` 退出码 **0** 且 ref 文件**存在**（41 字节）、`git rev-parse --verify` 退出码 **0**；`checkout -B agent/writer/<名>` 后 `branch --show-current` 正常报出该名、`symbolic-ref HEAD` 就指向它，没有 unborn；全新 clone 与既有 clone 一致。⇒ **不要再把"斜杠 ref 被吞"当成本机默认预期**，也别在 `update-ref` 成功时怀疑它没生效。
+- **根因（假设，未被复现支持）**：MSYS 的路径转换把 `a/b/c` 形态的 ref 当文件系统路径处理。若在别的 MSYS/git 组合上真命中，补准确版本号回来，本节结论按版本号收窄而不是改写。
+- **对策（只在命中时用）**：
   - 文件系统直写：`mkdir -p .git/refs/heads/<上级目录> && printf '%s\n' <SHA> > .git/refs/heads/<上级>/<名字>`；
   - 或者干脆不在本地建 ref，**裸 SHA 推到远端建分支**：`git push origin <SHA>:refs/heads/<branch>`，之后 `git fetch && git reset --hard origin/<branch>` 对齐本地。
-- **判定**：`git rev-parse <branch>` 能否解析出预期 SHA；解析不出而 ref 文件也不存在 = 命中。
+- **判定（与命不命中本条无关，任何 ref 写入后都跑）**：`git rev-parse --verify refs/heads/<branch>` 退出码 0 **且** `.git/refs/heads/<路径>` 文件存在。两个都读，才分得开"ref 根本没写进去"和"写进去了但不是你以为的那个名字"——只看其中一个，前一种会伪装成后一种。
 - **注意**：裸 SHA 推送后本地没有 `origin/<branch>` 跟踪引用，后续引用一律用 `FETCH_HEAD`（见 §5）。
 
-- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17
-- **复测出入（2026-09-17）**：本机 **未复现**。`git update-ref refs/heads/agent/writer/sec1-sec2 <sha>` 退出码 **0**，`.git/refs/heads/agent/writer/sec1-sec2` 文件**存在**（41 字节），`git rev-parse` 解析出预期 SHA、退出码 **0**；`git checkout -B agent/writer/claim-x` 同样退出码 0 且 `git branch --show-current` 报出该名；`git symbolic-ref HEAD` 仍是 `refs/heads/main`、HEAD 可解析 ⇒ 无 unborn。全新 clone 与既有 clone 都试过。两版结论都保留：本节描述的失败若在别的 MSYS/git 组合上成立，请补上准确版本号。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17 首发，2026-09-18 第三次复跑后降级
 
 ## 2. `commit-tree` 之后索引不会自动复位
 
 - **现象**：用 plumbing 造提交，"本次只改 2 个文件"的提交实际含 20 个文件，还以 `main` 为父（与另一条分支内容重复）。
 - **根因**：`commit-tree` 只造对象，不动 HEAD 也不动索引；索引里还留着上一批已提交的改动，下一次 `git write-tree` 会把它们再打进去一次。
-- **对策**：**每次 plumbing 提交完立刻复位索引**——`git read-tree <新HEAD>`（或 `git reset --mixed <新HEAD>`）。要精确控制内容就逐条 `update-index`：
+- **对策**：**每次 plumbing 提交完立刻用 `git reset --mixed <新HEAD>` 复位索引**。单写 `git read-tree <新HEAD>` 是不够的：`commit-tree` 不动 HEAD，比较基准仍是旧提交，实测索引差异 **1 → 1 原样不动**，它在这里是个幂等空操作；真正把差异抹平的是把分支指到新提交（`git update-ref refs/heads/<branch> <新SHA>`，此后 `git diff --cached` 自然为空）。只有当 HEAD 已经被移过去之后，`read-tree` 才等于"复位"——顺序不同，看到的差别就不同。要精确控制内容就逐条 `update-index`：
   ```bash
   W=$(git rev-parse :path/to/a.md)          # 暂存区里那份 blob
   git read-tree main                        # 索引 = main 的树
@@ -35,9 +35,8 @@ agent_created: true
   ```
 - **判定**：提交后 `git diff --stat <parent> <new>`，文件数远超预期即中招。
 
-- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17 首发，2026-09-18 复测改对策
 - **复测确认**：索引里先留 20 个文件的暂存改动、随后只 `git add` 2 个文件，`git write-tree` + `git commit-tree` 造出的提交实测为 `16 files changed, 18 insertions(+), 1 deletion(-)` —— 现象成立。`git reset --mixed HEAD` 复位索引有效（`git diff --cached --name-only` 由 1 归 0）。
-- **复测出入（2026-09-17）**：`git read-tree <新HEAD>` 单独执行**不改变** `git diff --cached` 的结果——`commit-tree` 不动 HEAD，比较基准仍是旧提交；真正让索引“看起来干净”的是把分支指到新提交（`git update-ref refs/heads/<branch> <新SHA>`），此后 `git diff --cached` 自然为空，`read-tree` 成了幂等空操作。若场景里 HEAD 已先移动，本节原文的顺序才成立。
 
 ## 3. 绕开 checkout 切分支 → 上一分支的文件以 staged 形态残留
 
@@ -49,14 +48,17 @@ agent_created: true
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17
 - **实测取值**：在 bA（含 `newA.txt`）上执行 `git read-tree -m -u bB`，退出码 **0**、HEAD 仍在 bA，`git status --porcelain` 得到 `D  newA.txt`（1 行，已暂存形态），该文件已从工作区消失；`git read-tree --reset -u bB` 结果相同。对策 `git reset --hard bB` 后 `git status --porcelain` 为 **0** 行、`git rev-parse HEAD` 与 bB 相等。
 
-## 4. worktree 会凭空"删除"文件
+## 4. worktree 会凭空"删除"文件；恢复命令要先分清索引动没动
 
 - **现象**：`git status` 突然满屏 `D`，但你没执行任何删除动作。
-- **对策**：`git checkout -- .` 恢复即可；养成动手前 `git status --porcelain` 拍快照的习惯，异常先恢复再继续。
-- **判定**：满屏 `D` 且自己没删过 → 就是它，不要去查是谁运行的清理脚本。
+- **两态（对策不同，先分清）**：
+  - **① 索引完好、只有工作区文件被外部删掉** → porcelain 是 ` D`（未暂存）。`git checkout -- .` 退出码 **0**、porcelain 归 0、文件回来。
+  - **② 索引也被清空了**（例如谁跑了 `git read-tree --reset -u <空树>`）→ porcelain 变 `D `（已暂存）。此时 `git checkout -- .` 报 `error: pathspec '.' did not match any file(s) known to git`、**退出码 1**、**一个文件都没恢复**；能用的是 `git checkout HEAD -- .` 与 `git read-tree --reset -u HEAD`，两者实测都把 porcelain 归 0、文件恢复。
+- **裁决记录**：上一轮复测把 ② 记成"退出码仍是 0、典型的 0 但没做成"，**这条不采纳**：同一种状态下用四种方式读退出码（裸跑、命令替换捕获、Node `spawnSync`、PowerShell `$LASTEXITCODE`）拿到的都是 **1**，只有把命令接进管道再读 `$?` 才是 0——那正是 `silent-failure-triage §1` 记的那条坑，别把它当 git 的行为。② 仍然是真陷阱，但它是**响的**（有 error 行 + 非 0），别指望它静默。
+- **对策（通用）**：动手前 `git status --porcelain` 拍快照，看首列还是第二列有 `D` 来定态；恢复后必须再读一次 porcelain 归 0，不要凭命令自述。
+- **判定**：满屏 `D` 且自己没删过 → 就是它，不要去查是谁运行的清理脚本；`checkout -- .` 之后 porcelain 没归 0 → 你在 ② 态，换 `checkout HEAD -- .`。
 
-- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17
-- **复测出入（2026-09-17，分两态）**：① **索引完好、只有工作区文件被外部删掉** → `git status --porcelain` 是 ` D`（未暂存），`git checkout -- .` 退出码 **0**、porcelain 归 0、文件回来 ⇒ 本节对策在这一态有效；② **索引也被清空**（实测用 `git read-tree --reset -u <空树>` 造出）→ porcelain 变 **16** 行 `D `（已暂存），此时 `git checkout -- .` 报 `error: pathspec '.' did not match any file(s) known to git` 且**退出码仍是 0**、什么都没恢复（本族最典型的“0 但没做成”），可用的是 `git checkout HEAD -- .` 与 `git read-tree --reset -u HEAD`，两者实测都把 porcelain 归 0、文件恢复。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · Node v24.18.0 · PowerShell 5.1 · 2026-09-17 首发，2026-09-18 拆两态并更正退出码读数
 
 ## 5. 含斜杠分支 fetch 后没有 `origin/<name>`
 
@@ -67,16 +69,17 @@ agent_created: true
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17
 - **复测条件（2026-09-17）**：本现象**取决于 `remote.<name>.fetch` 的 refspec**，不是无条件成立。① 默认 `+refs/heads/*:refs/remotes/origin/*` 下 `git fetch origin agent/writer/claim` 会**建出** `origin/agent/writer/claim`（输出行 `* [new branch]`），`git rev-parse` 退出码 0 ⇒ 不命中；② 收窄成 `+refs/heads/main:refs/remotes/origin/main` 后重跑同一条 fetch，输出只剩 `* branch … -> FETCH_HEAD`，`origin/agent/writer/claim` 解析失败 ⇒ 命中本节。两档下 `git rev-parse FETCH_HEAD` 都退出码 0；用显式 refspec（`refs/heads/<name>:refs/remotes/origin/<name>`）可事后补建跟踪引用。
 
-## 6. 对象库损坏：别增量救，直接重 clone
+## 6. 对象库损坏：别增量救，直接重 clone；旧判据本身是假阴性
 
-- **现象**：`git cat-file -t <sha>` → `fatal: object <sha> is not a valid object (or nonexistent)`，而远端明明有这个提交。
+- **现象**：读不到对象，而远端明明有这个提交。文案分两档（实测）：**对象文件不存在** → `fatal: git cat-file: could not get object info`；**文件在但字节损坏** → `error: inflate: data stream error (incorrect header check)` + `error: unable to unpack <sha> header`。两种下 `git cat-file -t <sha>` 退出码都是 **128**。（原文引的 `fatal: object <sha> is not a valid object (or nonexistent)` 本机没测到，别拿它当匹配串。）
 - **对策**：重新 `git clone <url> <newdir>`；**旧目录改名留作 `<x>.corrupt-bak`，别直接删**（里面临时产物可能还有价值）。
-- **判定**：`git rev-list --objects <sha> | grep -ic missing` 为 0 才算修好，再换目录继续。
-
-- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17
-- **复测出入（2026-09-17，本节判定失效）**：`git rev-list --objects <sha> | grep -ic missing` 在三种损坏下**都返回 0**，无法区分修好与没修好——① commit 对象被改字节：`rev-list` 自己退出码 **128**、grep 拿不到输入；② commit 对象缺失：同样 128；③ commit 完好但它引用的 blob 缺失：`rev-list` 退出码 0 而不打印任何 `missing` 行 ⇒ grep 还是 0（假阴性）。可用的两条：`git rev-list --objects --missing=print <sha> | grep -c '^?'`（健康 **0** / blob 缺失 **1**，并打印 `?<sha>`）与 `git fsck --no-progress`（健康退出码 **0** / 缺失退出码 **2**，输出 `missing blob <sha>`）。
-- **现象文案分档（实测）**：**对象文件不存在** → `fatal: git cat-file: could not get object info`；**文件在但字节损坏** → `error: inflate: data stream error (incorrect header check)` + `error: unable to unpack <sha> header`。两种下 `git cat-file -t <sha>` 退出码都是 **128**。本节原文引的 `fatal: object <sha> is not a valid object (or nonexistent)` 本机未测到。
-- **造损坏场景的前置（实测）**：loose 对象文件属性是 `-r--r--r--`，直接覆盖会 `Permission denied`、退出码 **1**；要先 `chmod +w` 才写得进去。
+- **判定（旧判据已作废）**：~~`git rev-list --objects <sha> | grep -ic missing` 为 0 才算修好~~ —— 实测在三种损坏下它**都返回 0**，包括 blob 真缺失、commit 完好但引用对象没了的情形，拿它当"修好了"会带着坏库继续干活。改用这两条，健康/损坏必然不同值：
+  - `git rev-list --objects --missing=print <sha> | grep -c '^?'` → 健康 **0** / 缺一个 blob **1**（并把 `?<sha>` 打出来）；
+  - `git fsck --no-progress` → 健康退出码 **0**、缺失退出码 **2**（输出 `missing blob <sha>`）。
+  - 注意 `git rev-list --objects <sha>` **裸跑**在损坏时自己就退 **128**——它失败不代表 grep 拿到输入，所以"grep 没匹配"在这个管道里毫无信息量。
+- **造现场的前置（实测）**：loose 对象文件属性是 `444`（`-r--r--r--`），直接覆盖会 `Permission denied`、退出码 **1**；要先 `chmod +w` 才写得进去。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17 首发
+- **复测确认（2026-09-18，独立第二次重跑）**：新建小仓库使 blob 落成 loose（mode 444）→ 健康态 `^?` 计数 0、`fsck` 退 0；`chmod u+w` 后删掉该 blob → 旧判据 `grep -ic missing` **仍是 0**（假阴性复现）、裸 `rev-list` 退 **128**、`--missing=print` 的 `^?` 计数 **1**、`fsck` 退 **2** 并打印 `missing blob <sha>`。上面每个数字都被第二次跑到。
 
 ## 7. `force-with-lease` 报 `stale info`：先 fetch 再试
 
@@ -89,12 +92,10 @@ agent_created: true
 ## 8. `git -c` 是顶层选项，写在子命令后面会退化
 
 - **现象**：`git push -c http.proxy=… origin main` 只打印用法，看起来"什么也没发生"。
-- **对策**：`git -c <opt>=<val> push …`（`-c` 必须在子命令之前）。同族：`git -C <dir>` 配 MSYS 路径偶尔 `cannot change to`，改用 `cd` 进仓库再执行。
+- **对策**：`git -c <opt>=<val> push …`（`-c` 必须在子命令之前）。实测 `git push -c http.proxy=… origin HEAD:refs/heads/<name>` → `error: unknown switch 'c'` + 打印 usage、退出码 **129**，远端确实没建出分支——它不是"什么也没发生"，是连命令都没解析完。把 `-c` 提到子命令之前重跑同一条 → 退出码 **0** 且分支建出（对策本身也被验证过，不是推出来的）。同族另一条 `git -C <dir>` 配 MSYS 形态路径（`<盘符>:/…` 与反斜杠绝对路径）连续 **5 次**全部退出码 **0** 并正确报出分支名，**`cannot change to` 在本机未证实，别按它预防**，只在别的 MSYS/git 组合上再查。
+- **复测注意（实测）**：把 `http://127.0.0.1:<端口>` 这类含 `<` `>` 的占位符值不加引号写进 bash 命令行，`<` 会被当成输入重定向，报 `No such file or directory` 并**静默改掉整条命令**（与本节同族）；占位符值要么加引号，要么写成不带尖括号的串。
 
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17
-- **实测取值**：`git push -c http.proxy=http://127.0.0.1:<端口> origin HEAD:refs/heads/<name>` → `error: unknown switch 'c'`，随后打印 `usage: git push [<options>] …`，退出码 **129**，远端**确实没有**建出该分支；把 `-c` 提到子命令之前（`git -c <opt>=<val> push …`）退出码 **0** 且分支建出。
-- **同族那条未复现（2026-09-17）**：`git -C <MSYS 形态路径>`（`<盘符>:/…`）连续 **5 次**全部退出码 **0** 并正确报出分支名，反斜杠绝对路径同样退出码 0——本节说的 `cannot change to` 需别的 MSYS/git 组合才会出现。
-- **复测注意（实测）**：把 `http://127.0.0.1:<端口>` 这类含 `<` `>` 的值不加引号写进 bash 命令行，`<` 会被当成输入重定向，报 `No such file or directory` 并**静默改掉整条命令**（与本节同族）；占位符值要么加引号，要么写成不带尖括号的串。
 
 ## 9. 暂存与收尾卫生
 
