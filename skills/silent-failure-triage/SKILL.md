@@ -125,8 +125,9 @@ agent_created: true
 - **对策**：判定解释器可用性要**真跑一次并看退出码**（`python3 --version` / `python -c "print(1)"`），并把解释器路径写死成绝对路径；多解释器并存时用 `py -0p` 先列清，报"模块不存在"时先确认跑的是哪一个。
 - **判定**：`Get-Item (Get-Command X).Source | Select-Object Length,Attributes`——`Length=0` 且含 `ReparsePoint` = 桩，视为不存在。同类：`npx`/`npm` 会同时投放 POSIX / `.ps1` / `.cmd` 三件套，cmd.exe、PowerShell、Git Bash 各取不同那份，所以"同一条命令在不同宿主行为不同"。
 
-- **验证于**：Windows 11 家庭中文版 10.0.26200 · Windows PowerShell 5.1.26100.9444 / cmd · python 3.12.10（另见 py -0p 列出的 3.13） · Node v24.18.0 · 2026-09-17
-  （实测：`%LOCALAPPDATA%\Microsoft\WindowsApps` 下 `python.exe` 与 `python3.exe` 均 `length=0`、`Attributes=Archive, ReparsePoint`；`python3 --version` 退出 0 且无输出（别名桩）；`python -c "print(1)"` 正常；`py -0p` 列出行含 `-V:3.13  C:\<项目>\python.exe` 与默认 `-V:3.12 *`；`where npx` 同时列出无扩展名 shell 形式与 `.cmd`，npm 目录里还并排放着 `.ps1`。）
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Windows PowerShell 5.1.26100.9444 / cmd · python 3.12.10（另见 py -0p 列出的 3.13） · Node v24.18.0 · 2026-09-17 首发，2026-09-18 第二次独立重跑
+  （实测：`%LOCALAPPDATA%\Microsoft\WindowsApps` 下 `python.exe` 与 `python3.exe` 均 `length=0`、`Attributes=Archive, ReparsePoint`；`python3 --version` **退出码 49**、stdout/stderr 各 0 字节（别名桩；同一个数在 PowerShell / Node / `.bat` 内 `ERRORLEVEL` 里读出来是 **9009**，见 `runtime-resolution-and-abi §1`）；`python -c "print(1)"` 正常——PATH 里第一个 `python` 是真解释器 3.12.10；`py -0p` 列出行含 `-V:3.13  C:\<某个早已卸载的目录>\python.exe`（该文件不存在）与默认 `-V:3.12 *`，`py --version` 退 0 出 3.12.10；`where npx` 同时列出无扩展名 shell 形式与 `.cmd`，npm 目录里还并排放着 `.ps1`。）
+  本注 2026-09-18 改过两处：原文把桩的退出码写成"退出 0 且无输出"，与**本节现象段自己的 49** 相互矛盾，重跑确认 49；并去掉了一个本机非标准安装根目录的字面路径（换成占位符，`py -0p` 输出形态的示意不受影响）。
 
 ## 12. 重试环掩盖错误前提
 

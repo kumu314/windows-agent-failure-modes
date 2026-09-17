@@ -25,11 +25,11 @@ cp -r skills/* ~/.claude/skills/
 |---|---|
 | [shell-quoting-and-path-forms](skills/shell-quoting-and-path-forms/SKILL.md) | Git Bash/MSYS 的引号与路径形态：命令替换吃掉反引号、heredoc 吞反斜杠、`/d/` 与 `/tmp` 原生程序不认、`//F` 被重写后静默失败、含空格路径被拆成多参数、`$(…)` 剥掉尾换行造成哈希假不等、过 260 字符后半数工具连"文件存在"都看不见、junction 各家答案不同、`[ -L ]` 取决于有没有尾斜杠，而吃掉目标内容的是路径尾反斜杠和 `del /f /s /q` |
 | [silent-failure-triage](skills/silent-failure-triage/SKILL.md) | "退出码 0 但没做成"的总账：管道让 `$?` 说谎（bash 与 cmd，PowerShell 不受影响）、空输出的三种成因（含下游工具没装时字段变空串而退出码仍是 0）、假同步与假陈旧、计划任务注册了却永不运行、解释器"存在"是 0 字节壳 |
-| [windows-text-encoding](skills/windows-text-encoding/SKILL.md) | 编码、BOM 与行尾：`.ps1` 要 BOM 而 `.bat` 不能要、`Get-Content` 默认 ANSI 读回即永久损坏、控制台代码页 vs 文件真字节、兜底代码被自己的 `except: pass` 吃掉、`core.autocrlf` 静默改字节让哈希校验说谎、"默认编码"是每个客户端各自的默认值而退出码全是 0 |
+| [windows-text-encoding](skills/windows-text-encoding/SKILL.md) | 编码、BOM 与行尾：`.ps1` 要 BOM 而 `.bat` 不能要（但 BOM 只修读入方向，写出仍归控制台代码页）、`Get-Content` 默认 ANSI 读回即永久损坏、控制台代码页 vs 文件真字节、兜底代码被自己的 `except: pass` 吃掉、`core.autocrlf` 静默改字节让哈希校验说谎、"默认编码"是每个客户端各自的默认值而退出码全是 0（读数还会被宿主注入的 `PYTHONUTF8`/`PYTHONIOENCODING` 整体改写） |
 | [git-ref-plumbing-on-windows](skills/git-ref-plumbing-on-windows/SKILL.md) | 绕开正常 checkout 之后要还的债：带斜杠 ref 的旧"被吞"结论已三次未复现（判据保留）、`commit-tree` 索引残留、worktree 满屏 `D` 要分索引动没动两态、对象库损坏的旧判据本身是假阴性 |
 | [github-network-and-api-fallback](skills/github-network-and-api-fallback/SKILL.md) | GitHub 网络分层排障 + REST 兜底：git 不读系统代理、TCP 通而 TLS 挂、Schannel 与 OpenSSL 结论相反、`postBuffer` 500MB OOM、push 静默失败改走 Contents API、逐对象核对远端时的三处假警报 |
 | [python-silent-data-errors](skills/python-silent-data-errors/SKILL.md) | Python 读写数据的不报错错误：`open()` 默认编码不是 UTF-8、`csv.writer` 少 `newline=''` 每行夹空行、pandas 3.x 起 `dtype == object` 恒假、`to_datetime` 静默吞值 |
-| [runtime-resolution-and-abi](skills/runtime-resolution-and-abi/SKILL.md) | 到底哪个解释器在跑：App Execution Alias 存根、`py -0p` 列出不存在的路径、原生模块 ABI 不匹配、PATH 顺序随 shell 变、venv 没激活而 pip 装到全局、PowerShell 执行策略让脚本根本没跑起来 |
+| [runtime-resolution-and-abi](skills/runtime-resolution-and-abi/SKILL.md) | 到底哪个解释器在跑：App Execution Alias 存根（同一个壳的退出码还随"谁在读"变，49 / 9009 两个数都是真的）、`py -0p` 列出不存在的路径、原生模块 ABI 不匹配、PATH 顺序随 shell 变、venv 没激活而 pip 装到全局、PowerShell 执行策略让脚本根本没跑起来（生效档取决于宿主怎么启动，不是机器属性） |
 | [agent-runtime-boundaries](skills/agent-runtime-boundaries/SKILL.md) | Agent 自己的环境边界：调用结束回收全部子进程、独立回环与 overlay 临时盘、本地操作报外联错、单命令超时、长任务断点续传、越界写入是等待授权不是失败、共享库的写通道报内部错时先读链尾再重试、派活回显成功而聚合视图仍显示 `(unclaimed)`、共享工作树里未提交的半改让同事的门槛偶发失败 |
 | [chromium-cdp-on-windows](skills/chromium-cdp-on-windows/SKILL.md) | CDP 操控真实 Chrome：默认 profile 禁调试端口、Chrome 不继承环境代理、⛔关掉最后一个 page 会让浏览器整体退出、target 堆积致握手挂起、Cookie 继承的前置顺序、要人参与的流程不能由 agent 起进程 |
 | [stale-output-layers](skills/stale-output-layers/SKILL.md) | "改了没生效"的五层定位：源码 / 构建 / 服务 / 渲染 / 部署，每层一条独立判据；Service Worker 清理的两个顺序约束、备份放项目内会弄坏构建、收尾要一次真实渲染证据 |

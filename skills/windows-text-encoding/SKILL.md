@@ -15,10 +15,12 @@ agent_created: true
 - **对策**：`.ps1` 存 UTF-8 with BOM、`.bat` 存无 BOM 且注释尽量纯 ASCII（要中文就 echo 英文）；`.bat` 固定用 `powershell -NoProfile -ExecutionPolicy Bypass -File "<绝对路径>.ps1"` 起脚本。
 - **判定**：成对断言首三字节，别只看文件名。
   ```bash
-  head -c 3 a.ps1 | xxd   # 期望 45fbb… 即 efbbbf
+  head -c 3 a.ps1 | xxd   # 期望 ef bb bf（就这三个字节；无 BOM 时这里可能是行首 ASCII，见下）
   head -c 3 a.bat | xxd   # 期望不是 efbbbf
   ```
+  两个读数陷阱：① **无 BOM 时首三字节取决于首行写了什么**——实测 `# 中文注释` 打头的无 BOM UTF-8 `.ps1` 是 `23 20 e4`（`#`+空格），不是内容编码的特征串，分类要先跳过行首 ASCII（命令见 `runtime-resolution-and-abi §7` 判定第 2 岔）；② **补 BOM 只修好读入方向**。实测同一个 `Write-Output '中文'`，带 BOM 版进程内部码点正确（`4e2d,6587`）但 **stdout 原始字节是 GBK `d6 d0 ce c4`**，按 UTF-8 解码的下游反而在这版看到乱码；要稳定 UTF-8 输出得另设 `[Console]::OutputEncoding`。写读两个方向各断言一次，别给一个 BOM 就宣布两头都好（三层对照表见 `runtime-resolution-and-abi §7`）。
   PowerShell 侧：`[IO.File]::ReadAllBytes($p)[0..2]`。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（zh-CN，ACP=OEMCP=936） · Windows PowerShell 5.1.26100.9444（本机无 pwsh 7） · Git Bash 5.2.37(1)-release(x86_64-pc-msys)（`xxd` 为其自带） · Python 3.12.10 · 2026-09-18（上面两个"读数陷阱"是本轮实测新增，含带 BOM / 无 BOM 两版 stdout 原始字节）
 
 ## 2. `Get-Content` 默认按 ANSI 读，读进来再写回去就永久损坏
 
@@ -93,7 +95,7 @@ agent_created: true
   - 打 `true`（或 `input`）**且** `check-attr` 打 `text: unspecified` / `eol: unspecified` → **确诊危险**：下一次 `git add` 会静默改字节，且 stdout/stderr 都是 0 字节。实测未钉的 scratch 仓库正是这一组。
   - `check-attr` 打 `text: auto` + `eol: lf` → **确诊安全**：行尾由仓库钉死，跨机器一致，`add` 会给 98 字节 warning 而不是沉默。实测本仓库与钉死后的 scratch 都是这一组。
   - `core.autocrlf` 无输出、退出码 1 → checkin 侧不改，**但不等于安全**（工作树仍可能被 `.gitattributes` 或队友已污染的 blob 影响），继续跑下面两条审计。
-  - 附：`git check-attr` 对不存在的路径照样解析（实测 `git check-attr text eol -- no/such/path.md` → `text: auto` / `eol: lf`，退出码 0），所以不必先找真文件；`-- .` 也可直接用。
+  - 附：`git check-attr` 对不存在的路径照样解析、退出码 0，所以**不必先找真文件**（实测 `git check-attr text eol -- no/such/path.md` 在两种仓库里都退 0）；但**那两个字段的值是仓库性质，不是路径性质，别照抄数字**：2026-09-18 同一条命令对照跑，本仓库（`* text=auto eol=lf` 已钉）打 `text: auto` / `eol: lf`，未钉的 scratch 仓库打 `text: unspecified` / `eol: unspecified`。**读上面三条分支时先认这台机器的仓库钉没钉**——在未钉仓库里跑出一条路径得到 `unspecified`，那是分支 1 的**正确确诊输入**，不是你命令写错了。`-- .` 也可直接用。
   再补两条**互补**审计（各自覆盖对方的盲区，只做第一条会漏）：
   ```bash
   git ls-files --eol | grep -vE '^i/([a-z]+)[[:space:]]+w/\1'          # 退出码 1=全部一致 / 0=至少一个文件工作树形态≠索引形态
@@ -103,8 +105,8 @@ agent_created: true
   done
   ```
   实测第二条在未钉仓库打出 `BLOB_HAS_CR j.txt 2 6`（该文件是 `i/crlf w/crlf`，**第一条 grep 看不见它**，因为两侧形态"一致"）；本仓库上第一条退出码 1（无形态不一致）、第二条空输出（无 blob 含 CR），**两条各自为真才算安全**。
-  **两个现场踩到的坑**：① 反引用**必须写在单引号里**。写成 `$'^…w/\1'` 会被 bash 当八进制转义吃掉，模式里变成一个 `0x01` 字节，反引用永不匹配 → `grep -v` **把所有行都吐出来且退出码 0**，一眼看去像"全仓库每个文件都被改了"（实测：同一命令在干净的本仓库上，单引号版退出码 1/0 行输出，`$'…'` 版退出码 0/把跟踪文件全列出来）。② `grep` 的退出码方向和"有没有问题"是**反的**（0=匹配到=有问题，1=没匹配到=安全），别按 `silent-failure-triage §1` 的直觉读。
-- **验证于**：Windows 10.0.26200.0（`cmd /c ver` 报 10.0.26200.9457）· Git Bash `GNU bash 5.2.37(1)-release (x86_64-pc-msys)` · git 2.53.0.windows.2 · zh-CN / ACP 936（`[Text.Encoding]::Default` = `gb2312`）· 2026-09-17
+  **三个现场踩到的坑**：① 反引用**必须写在单引号里**。写成 `$'^…w/\1'` 会被 bash 当八进制转义吃掉，模式里变成一个 `0x01` 字节，反引用永不匹配 → `grep -v` **把所有行都吐出来且退出码 0**，一眼看去像"全仓库每个文件都被改了"（实测：同一命令在干净的本仓库上，单引号版退出码 1/0 行输出，`$'…'` 版退出码 0/把跟踪文件全列出来）。② `grep` 的退出码方向和"有没有问题"是**反的**（0=匹配到=有问题，1=没匹配到=安全），别按 `silent-failure-triage §1` 的直觉读。③ **`git ls-files --eol` 不能按空白切列**：它的 `attr/` 字段自身含空格、文件名前是一个 TAB。实测字段数分布——本仓库（已钉 `* text=auto eol=lf`）**16 行全是 5 段**（`attr/text=auto` + `eol=lf` 被切开），未钉的 scratch 仓库 `attr/` 为空、**4 段**。所以 `awk '{print $3}'` 在钉过的仓库拿到的不是文件名、在未钉仓库拿到 `attr/`，同一个列号两种仓库指向不同东西；而"未钉"那种恰好不碎，**测试样本会骗人**。要取列就用锚定正则（如上面那条 `^i/…` 的写法）或 `-z` 后自己按最后一个 TAB 切。
+- **验证于**：Windows 10.0.26200.0（`cmd /c ver` 报 10.0.26200.9457）· Git Bash `GNU bash 5.2.37(1)-release (x86_64-pc-msys)` · git 2.53.0.windows.2 · zh-CN / ACP 936（`[Text.Encoding]::Default` = `gb2312`）· 2026-09-17 首发 · 2026-09-18 独立复跑：机制结论三条分支全部一致，但**两处读数被证明是仓库性质而非普适答案**（`check-attr` 对不存在路径的取值在未钉仓库是 `unspecified/unspecified`；`ls-files --eol` 字段数 5 段 vs 4 段），已在正文分别注明，别照抄数字。
 
 ## 8. 「默认编码」按客户端各定各的：拿到命令先走五岔链，**退出码不参与判定**
 
@@ -130,14 +132,26 @@ agent_created: true
   # 岔 3｜边界：跨进程几次就重编码几次，先取这两个读数
   powershell -NoProfile -Command "\$OutputEncoding.WebName;[Console]::OutputEncoding.CodePage"   # → us-ascii / 936
   # 岔 4｜读方：同机器两套相反答案（Get-Content 的默认另见 `windows-text-encoding §2`）
+  #   ⚠ 取这四个值之前先读一个前置量，否则拿到的可能不是"这台机器的默认值"而是宿主注入的结果：
+  python -c "import sys;print('utf8_mode=',sys.flags.utf8_mode)"   # 0=原生默认；1=有 PYTHONUTF8/PYTHONIOENCODING/-X utf8 覆盖
   python -c "import sys,locale;print(sys.getdefaultencoding(),sys.getfilesystemencoding(),locale.getpreferredencoding(False),sys.stdout.encoding)"   # → utf-8 utf-8 cp936 gbk
   node -e "console.log(Buffer.from('中文测试').length)"           # → 12；Node 侧恒 UTF-8，不受 ACP 影响
   # 岔 5｜字节验收（唯一有效判据）
   python -X utf8 -c "import sys;b=open(sys.argv[1],'rb').read();g=lambda e:b.decode(e,'replace')==b.decode(e,'ignore');print('%-12s len=%-4d head=%-23s utf8=%-5s gbk=%-5s hasFFFD=%s'%(sys.argv[1],len(b),b[:8].hex(' '),g('utf-8'),g('gbk'),chr(0xfffd) in b.decode('utf-8','ignore')))" <文件>
   ```
   期望读数（本机实测，缺一即命中）：无 BOM UTF-8 `utf8=True gbk=False`；GBK `utf8=False gbk=True`；UTF-16LE `utf8=False gbk=False` 且 `head=ff fe…`（**UTF-16 只认 BOM**——偶长字节丢给 `utf-16` 一定"解得开"，实测把 GBK 文件按 utf-16 解会出 `탖쓎…`，参与投票必误判）。两条阶梯查不出来的情况要记住：`utf8=True hasFFFD=True` 是"**已经坏了但能解**"（`c_fix.txt` 就是这样），一旦 `hasFFFD` 为真就别再往这个文件写任何东西；`head=3f 3f 3f 3f` 是"中文已被替换成问号"，它是合法 ASCII，阶梯两头都 True，只能靠"写方是谁"+ 与已知好的字节对比发现。`?`/U+FFFD 一旦出现即不可逆：实测把那条 `PYTHONUTF8=1` 产出的 mojibake 串（13 B 的 UTF-8 源文件变成 18 B 的 UTF-16 乱码文件）拿 `.encode('gbk')` 想还原，会先撞 `UnicodeEncodeError: '\ue15f' illegal multibyte sequence`。**退出码不能当编码判据**——同一类 UTF-8 中文，Python 默认读 `中文测试` 抛异常 exit 1、读 `你好世界` 静默 exit 0；何况管道还会让 `$?` 说谎（见 silent-failure-triage §1）。
-  本机可用工具边界（判定链依赖它们）：`iconv`/`jq`/`bc`/`rev`/`pwsh` **都不存在**，所以"Git Bash 里一行转码"这条路直接不可用，跨码页转换只剩显式两端指定（Python `encoding=`，或实测可用的 `node -e "new TextDecoder('gbk').decode(...)"`，本机 Node 带全 ICU）；`file -b` 会把 GBK 报成 `ISO-8859 text`，不可信；取字节用 `xxd`（Git Bash）或 `Format-Hex`（仅 PowerShell 内）。另注意 `python3` 在本机是 0 字节 App Execution Alias 壳（`--version` 零输出、**exit 49**，`Length=0` + `ReparsePoint`，见 runtime-resolution-and-abi §1），`py -3` 指向一个不存在的路径、**exit 101**，且它报错末尾那串 `?` 是**生产端就已经写出的 `3f` 真字节**、不是显示层（见 runtime-resolution-and-abi §2）——所以本节所有 Python 读数都是用 PATH 里第一个真解释器（3.12.10）取的。调 `cmd` 取"第三个客户端"的读数时也别裸写 `cmd /c "…"`：MSYS 会把 `/c` 当路径重写掉，结果起了个交互式 cmd、**照样 exit 0** 且一个文件都没落（实测），必须加 `MSYS_NO_PATHCONV=1`（见 shell-quoting-and-path-forms §7）。
-- **验证于**：Windows 11 家庭版 中文版 10.0.26200.9457（zh-CN，ACP=OEMCP=936，`Get-Culture`/`Get-WinSystemLocale`/`Get-UICulture` 均 zh-CN，注册表 `Nls\CodePage` 的 ACP/OEMCP 都 936 = 没开系统级 UTF-8） · Git Bash 5.2.37(1)-release(x86_64-pc-msys) / MINGW64_NT-10.0-26200 / MSYS 3.6.6，本会话 `LANG`/`LC_ALL=C.UTF-8` 为父进程注入（`env -u LANG` 后 Git Bash 自己给 `zh_CN.UTF-8`，两种取值下 `printf` 落盘字节完全相同） · Windows PowerShell 5.1.26100.9444（本机无 pwsh 7） · Python 3.12.10（`<用户名>\AppData\Local\Programs\Python\Python312\python.exe`） · Node v24.18.0 · git 2.53.0.windows.2 · 2026-09-17
+  **岔 4 前置量为什么必须先读**：`utf8_mode=1` 时（宿主注入 `PYTHONUTF8=1` 或 `PYTHONIOENCODING=utf-8`，agent / IDE / CI 三类宿主都常见）上面那四个值会整体变成 `utf-8 utf-8 utf-8 utf-8`，**并且"用默认编码读 UTF-8 中文抛异常"这条现象直接消失**——实测同一份文件、同一句代码：`utf8_mode=0` 抛 `UnicodeDecodeError: 'gbk' codec can't decode byte 0xad in position 2` 退 1，`utf8_mode=1` 退 0 且内容正确。照抄"全 utf-8"的读数会得出**"这台机器没有 GBK 问题"的反向结论**，而它只说明当前这个 Python 进程被环境变量接管了。
+  但**反过来也不成立：`utf8_mode=0` 不等于拿到了原生默认值**。实测三行对照（同一条 `-c` 打印 `utf8_mode` + 四个编码值，Python 3.12.10）：
+
+  | 环境变量 | 读数 |
+  |---|---|
+  | `PYTHONUTF8=1 PYTHONIOENCODING=utf-8` | `1 utf-8 utf-8 utf-8 utf-8` |
+  | `env -u PYTHONUTF8 -u PYTHONIOENCODING` | `0 utf-8 utf-8 cp936 gbk` ← 这才是本机原生值 |
+  | 只 `env -u PYTHONUTF8`（留着 `PYTHONIOENCODING`） | `0 utf-8 utf-8 cp936 `**`utf-8`** |
+
+  第三行是新的假阴性来源：`PYTHONIOENCODING` **单独**就能把第四个值抬成 `utf-8`，而**不会**把 `utf8_mode` 置 1。所以别只读一个 `utf8_mode` 就宣布"没被接管"——**岔 4 的完整读数是 `utf8_mode` + `PYTHONUTF8`/`PYTHONIOENCODING` 两个变量在不在**三者一起记，只记四个编码值不足以复现，只记 `utf8_mode` 也不足。清干净再取原生值：`env -u PYTHONUTF8 -u PYTHONIOENCODING python -c "…"`（实测逐字复现原文四值）。
+  本机可用工具边界（判定链依赖它们）：`iconv`/`jq`/`bc`/`rev`/`pwsh` **都不存在**，所以"Git Bash 里一行转码"这条路直接不可用，跨码页转换只剩显式两端指定（Python `encoding=`，或实测可用的 `node -e "new TextDecoder('gbk').decode(...)"`，本机 Node 带全 ICU）；`file -b` 会把 GBK 报成 `ISO-8859 text`，不可信；取字节用 `xxd`（Git Bash）或 `Format-Hex`（仅 PowerShell 内）。另注意 `python3` 在本机是 0 字节 App Execution Alias 壳（`--version` 零输出、**exit 49**——这个数还随"谁在读"变，PowerShell / Node / `.bat` 内 `ERRORLEVEL` 读到的是 **9009**，见 `runtime-resolution-and-abi §1`；`Length=0` + `ReparsePoint` 同节），`py -3` 指向一个不存在的路径、**exit 101**，且它报错末尾那串 `?` 是**生产端就已经写出的 `3f` 真字节**、不是显示层（见 runtime-resolution-and-abi §2）——所以本节所有 Python 读数都是用 PATH 里第一个真解释器（3.12.10）取的。调 `cmd` 取"第三个客户端"的读数时也别裸写 `cmd /c "…"`：MSYS 会把 `/c` 当路径重写掉，结果起了个交互式 cmd、**照样 exit 0** 且一个文件都没落（实测），必须加 `MSYS_NO_PATHCONV=1`（见 shell-quoting-and-path-forms §7）。
+- **验证于**：Windows 11 家庭版 中文版 10.0.26200.9457（zh-CN，ACP=OEMCP=936，`Get-Culture`/`Get-WinSystemLocale`/`Get-UICulture` 均 zh-CN，注册表 `Nls\CodePage` 的 ACP/OEMCP 都 936 = 没开系统级 UTF-8） · Git Bash 5.2.37(1)-release(x86_64-pc-msys) / MINGW64_NT-10.0-26200 / MSYS 3.6.6，本会话 `LANG`/`LC_ALL=C.UTF-8` 为父进程注入（`env -u LANG` 后 Git Bash 自己给 `zh_CN.UTF-8`，两种取值下 `printf` 落盘字节完全相同） · Windows PowerShell 5.1.26100.9444（本机无 pwsh 7） · Python 3.12.10（`<用户名>\AppData\Local\Programs\Python\Python312\python.exe`） · Node v24.18.0 · git 2.53.0.windows.2 · 2026-09-17 首发 · 2026-09-18 独立复跑：本会话 ambient **未**设 `PYTHONUTF8`/`PYTHONIOENCODING`（`utf8_mode=0`，四个值与原文逐字一致），上面那张三行环境变量对照表是当天新测；据此在岔 4 前加了前置量读数。
 
 ## 复用信号
 "改完脚本没生效""只有中文出错""同一文件我看得懂下游看不懂""读到一串问号""解码没报错但内容是乱的" → 一律先取字节再看，别在文本层推理。
