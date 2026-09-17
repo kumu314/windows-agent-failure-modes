@@ -1,6 +1,7 @@
 ---
 name: python-silent-data-errors
 description: Windows 上用 Python 读写数据时那些"不报错、结果却是错的"失效模式。跑数据分析/清洗脚本、把结果交给下游读、Excel/CSV 往返、"我明明没报错怎么数字不对"之前读。触发词：pandas、read_csv、read_excel、to_excel、NaT、NaN、dtype object、清洗没生效、空行、多出来一行、\r\r\n、invalid start byte、编码没设 encoding、日期解析不出来、版本升级后结果变了。
+agent_created: true
 ---
 
 # Python 数据读写的静默错误

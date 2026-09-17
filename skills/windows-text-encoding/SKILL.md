@@ -1,6 +1,7 @@
 ---
 name: windows-text-encoding
 description: Windows 文本编码与 BOM 判定手册。写/改 PowerShell 脚本、批处理 .bat、含中文的数据文件、脚本"运行成功但输出乱码"、读别人给的文件出现替换字符之前读。触发词：乱码、编码、BOM、efbbbf、UTF-8 读坏、GBK、cp936、chcp、Get-Content、解析器报 invalid start byte、中文变问号、脚本改完不生效。
+agent_created: true
 ---
 
 # Windows 编码与 BOM

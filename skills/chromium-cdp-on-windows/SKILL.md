@@ -1,6 +1,7 @@
 ---
 name: chromium-cdp-on-windows
 description: 在 Windows 上用 CDP（connect_over_cdp / 调试端口）自动化操控真实 Chrome 的失效模式与禁令。要操作已登录的网页后台、connect_over_cdp 握手挂起、调试端口起不来、"正在现有会话中打开"、页面越开越卡死、跑到一半 TargetClosedError、浏览器被连带关掉之前读。触发词：CDP、9222、remote-debugging-port、connect_over_cdp、user-data-dir、调试 Chrome、target 过多、json/close、末窗口、握手超时、TargetClosedError、Chrome 退出、taskkill、登录页又弹出来。
+agent_created: true
 ---
 
 # Windows 上的 Chrome/CDP 自动化

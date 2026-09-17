@@ -1,6 +1,7 @@
 ---
 name: agent-runtime-boundaries
 description: AI agent 自己的执行环境有哪些硬边界（进程回收、沙箱回环、overlay 临时盘、单命令超时、授权边界、跨会话能力漂移）。后台服务起不来、localhost 连不上、生成的文件下条命令就没了、命令被超时掐断、"我起的进程哪去了"、子代理说做完了但不明之前读。触发词：后台进程、起服务、nohup、&、run_in_background、Start-Process、连不上 127.0.0.1、端口拒连、文件消失、overlay、沙箱、超时被杀、命令太长、一次跑不完、要授权、子代理说完成、备份残留。
+agent_created: true
 ---
 
 # Agent 运行环境的硬边界
