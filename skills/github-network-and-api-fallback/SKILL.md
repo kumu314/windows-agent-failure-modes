@@ -23,6 +23,8 @@ agent_created: true
   端口猜错的表现为 `Could not connect to server`——那说明该端口上没程序监听，别硬试；用 `Get-NetTCPConnection -LocalPort <端口> -State Listen` 确认代理核心真的在跑（只有 helper 进程在 = 没在跑）。
   确实无代理时多为间歇性 reset，有界重试（≤5 次、每次间隔几秒）常能过。
 - **判定 / 红线**：**不要为了省事写 `git config --global http.proxy`**。全局一旦设了，代理软件没开的每一次 git 操作都会去连那个死端口并超时，比直连失败更难排查（且这条配置在别人的机器上会跟着仓库走）。恢复办法只有 `--global --unset`，但那是改用户配置，属于应当避免的动作。
+- **复测确认（2026-09-18）**：`Get-ItemProperty` 实测 `ProxyEnable=1`、`ProxyServer` 指向本机回环端口；同时四个常被猜的默认端口的 `Get-NetTCPConnection -State Listen` 计数**全为 0**——"默认端口猜错"当场实证：真端口只从注册表读，别猜（具体端口号按红线不入库）。系统代理开着的同时，`curl -s https://api.github.com/user` 仍直连拿到 401（见 §5），即命令行工具确实不读系统代理。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · PowerShell 5.1 · curl 8.18.0(Schannel) · 2026-09-18
 
 ## 2. 分层测，不要整体测：TCP 通 ≠ TLS 通 ≠ 写通道通
 
@@ -38,6 +40,8 @@ agent_created: true
   ```
   `L1 通 + L2 挂` = 该主机的 TLS 被中断，换代理或换协议通道，**别再改 git 参数**。`L2 通但 push 挂` = 问题在写通道，见 §5。
 - **附带结论**：**`gh api` 通不代表 push 通**——它们走的是不同主机、不同协议路径。老规矩：先分层测量，再下诊断。
+- **复测确认（2026-09-18）**：L1 实测 `github.com:443` TCP 握手 1.35 秒通；同一轮 L2 逐主机实测 **github.com=200 / api.github.com=200 / codeload.github.com=301，而 `raw.githubusercontent.com=000`（curl exit 28 超时）**——同一分钟四个主机三种结果，"L1 通 + 单主机 L2 挂"再次成立，且挂的是 §3 会提到的那台静态主机。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · curl 8.18.0(Schannel) · 2026-09-18
 
 ## 3. 同一个 URL 在不同 TLS 栈下结论相反
 
@@ -49,6 +53,8 @@ agent_created: true
   ```
   读仓库文件优先 `raw.githubusercontent.com`（纯静态，绕开 API 限流）；整包下载用 `https://codeload.github.com/<owner>/<repo>/zip/refs/heads/<branch>`（tag 换成 `refs/tags/<tag>`），比 `git clone` 更少受 git 通道问题牵连。
 - **判定**：两个栈结果不一致时，**结论是"这个客户端不可达"，不是"网络不可达"**，直接换客户端而不是换网络。
+- **复测确认（2026-09-18）**：同一 URL（`raw.githubusercontent.com/<owner>/<repo>/main/README.md`）同分钟三栈实测——**curl 8.18.0(Schannel) 超时（`http=000` / exit 28）、Node v24 `fetch` 成功（3653 字节）、PowerShell `Invoke-WebRequest` 成功（200 / 3653 字节）**。三栈两通一挂，"结论是'这个客户端不可达'"原样成立。注意本机 curl 也是 Schannel 后端、却与 git 的 Schannel 表现不同——栈按实测行为分，不按后端名字猜。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · curl 8.18.0(Schannel) · Node v24.18.0 · PowerShell 5.1 · 2026-09-18
 
 ## 4. `Out of memory, malloc failed (tried to allocate 524288000 bytes)`
 
@@ -64,6 +70,8 @@ agent_created: true
   export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.postBuffer GIT_CONFIG_VALUE_0=1048576
   ```
 - **判定**：报错里的字节数就是元凶——`524288000 ≈ 500MB`，和配置值对得上即确认。
+- **复测确认（2026-09-18）**：`git config --list --show-origin | grep -i postbuffer` 在本机**直接命中全局 `.gitconfig` 的 `http.postbuffer=524288000`**——500MB 配置实锤在机，佐证"小仓库也 OOM"的机制；修复路径仍是 `-c http.postBuffer=1048576` 一次性覆盖，不动全局。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-18
 
 ## 5. push 彻底静默：exit 128，stdout/stderr 全空
 
@@ -75,6 +83,8 @@ agent_created: true
   ```
   有 HTTP 码 = 网络与凭证都没问题，是 git 的 push 通道坏了 → 直接走 §6 的 Contents API。
 - **止损线**：静默失败**重试超过 2 次就停**；不要 reset / rebase / 换 remote / `--force` 来"治好 push"——工作树没问题，动得越多风险越大。
+- **复测确认（2026-09-18）**：`curl -s -m 12 -o /dev/null -w '%{http_code}' https://api.github.com/user` 实测返回 **401**（未带 token 的预期码）——"401/403/200 都算通"的 30 秒定链路判定可用；本机静默 push 失败场景本轮未重演（链路正常），止损线规则照旧。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · curl 8.18.0(Schannel) · 2026-09-18
 
 ## 6. Contents API 写文件：六个已知边界
 
@@ -96,6 +106,8 @@ gh api --method PUT repos/<owner>/<repo>/contents/<path> \
   ```
   比"文件大小/行数"会漏掉内容被截断；字节级哈希是唯一硬证据。
 - **收尾**：立刻把真实远端 SHA 记进项目记录，否则下一轮会误判"推没推上去"。
+- **复测确认（2026-09-18 · 只读）**：`gh api repos/<owner>/<repo>/branches/main --jq .commit.sha` 一次取值成功（并用作 §8 对账基准）；PUT 写入路径本轮未重演（写目标仓库属对外动作，遵循 push 等仓库维护者），边界 ①②③⑤⑥ 维持原文。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · gh 2.97.0 · 2026-09-18
 
 ## 7. 凭证侧的三个静默坑
 
@@ -106,6 +118,8 @@ gh api --method PUT repos/<owner>/<repo>/contents/<path> \
 - **`gh` 突然要求 `gh auth login`、`gh auth status` 说没有登录任何 host、`~/.config/gh/` 不存在** = gh 的登录态丢了，**但 GCM 里的凭据通常还在**（`git credential fill` 仍能拿到）。此时别去跑交互式的 `gh auth login`（自动化环境里跑不完），直接切 curl + token，或 `export GH_TOKEN=...` 让 gh 复用。
 - **403 的响应体里通常写着答案**（例：`Upgrade to GitHub Pro or make this repository public to enable this feature.` = 该功能私有库不开放）。只看状态码就重试，等于把一句话能定位的问题重跑十遍。同理，`422` 十有八九是 **SHA 少写/多写一位**——SHA 永远动态取（`git rev-parse HEAD` 或上一步 API 返回值），禁止手敲短 SHA 拼长。
 - **"推成功 ≠ 可访问"**：交付物的在线链接在仓库仍是 private 时对外是 404。要么改可见性（这是对外的动作，先取得同意），要么别声称链接可用。
+- **复测环境差异（2026-09-18）**：本机 `gh auth status` 完好（keyring 存储、token 含 `repo` scope），"登录态丢失、`~/.config/gh/` 不存在"的场景**未复现**——本轮无 401 循环现场，`tr -d '\r\n'` 路径也无需触发；原结论保留，遇到真实 401 时按本节排查。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · gh 2.97.0 · 2026-09-18
 
 ## 8. 逐对象核对"远端 == 本地"：三处会自己造出假警报的地方
 
@@ -125,6 +139,9 @@ gh api --method PUT repos/<owner>/<repo>/contents/<path> \
   两侧都取 **full SHA**，别拿 7 位短 SHA 参与比对。
 - **判定**：① 上面 `diff` 为空且本地 `git cat-file -t <远端返回的 commit.sha>` 不报错 = 真一致；② 报"少文件"之前先读返回体的 **`.truncated`**——大仓库的 `recursive=1` 会截断，`truncated: true` 时"远端少了几条"是**接口没返回**，不是仓库真缺；③ 只有当换掉 `tr '\t' ' '` 之后 diff 才变红，才说明确实是内容差异而不是分隔符。
 - **附带一条同族**：这台机器的 Git Bash 里**没有外部 `jq`**。把取值写成 `echo ".sha : $(curl -s … | jq -r .sha)"` 时，输出是**空串**而 `$?` 是 **0**（实测：改成 `v=$(jq …)` 的赋值形式才露出 `127`），于是 5 个字段全空，看起来完全像"API 没返回这些字段"。改用 `gh api --jq`（自带表达式引擎、不依赖外部 `jq`）后一次就取到了值。泛化规则见 `silent-failure-triage §2`。
+- **复测确认（2026-09-18）**：三个坑全部当场复现——① `gh api repos/<owner>/<repo>/git/trees/HEAD --jq .sha` 回显的是 **commit SHA**、传 `HEAD^{tree}` 才得 tree SHA，两者实测不同值；② 口径差实测 **16（blob-only）vs 28（含目录条目）**、返回体 `.truncated=false`；③ 未做 `tr '\t' ' '` 时原始 `diff` 报 **28 行全红**，同一基准加上 `tr` 后 `diff` 为 **IDENTICAL**。外部 `jq` 缺失同样复现（`which jq` 无输出）。
+- **复测的元教训（2026-09-18）**：第一次对账拿**本地 HEAD（领先远端 2 个未推提交）**去比**远端 HEAD**，得到 28 行"差异"——方向对、基准错，那是**真实分歧**不是格式坑。**对账第一步是把两侧钉到同一个 commit**：先 `gh api .../branches/main --jq .commit.sha` 取远端基准、确认本地 `git cat-file -t <sha>` 存在再开比；分叉状态下任何"不一致"结论都无效。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · git 2.53.0.windows.2 · gh 2.97.0 · 2026-09-18
 
 ## 复用信号
 
