@@ -1,4 +1,4 @@
-# Agent Pitfalls (Windows)
+# Windows Agent Failure Modes
 
 **在 Windows 上跑 AI coding agent 反复踩到的失效模式，以及踩完之后定下的判据。**
 
