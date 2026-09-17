@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+
+# 本仓库自己的建议：调试产物与凭据不该出现在这里
+*debug_profile/
+.session.json
+*cookies*
+*.env
+secrets/
