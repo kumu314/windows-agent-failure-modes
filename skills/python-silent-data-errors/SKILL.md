@@ -1,6 +1,6 @@
 ---
 name: python-silent-data-errors
-description: Windows 上用 Python 读写数据时那些"不报错、结果却是错的"失效模式。跑数据分析/清洗脚本、把结果交给下游读、Excel/CSV 往返、"我明明没报错怎么数字不对"之前读。触发词：pandas、read_csv、read_excel、to_excel、NaT、NaN、dtype object、清洗没生效、空行、多出来一行、\r\r\n、invalid start byte、编码没设 encoding、日期解析不出来、版本升级后结果变了。
+description: Windows 上用 Python 读写数据时那些"不报错、结果却是错的"失效模式。跑数据分析/清洗脚本、把结果交给下游读、Excel/CSV 往返、"我明明没报错怎么数字不对"之前读。触发词：pandas、read_csv、read_excel、to_excel、NaT、NaN、dtype object、清洗没生效、空行、多出来一行、\r\r\n、invalid start byte、编码没设 encoding、日期解析不出来、版本升级后结果变了、DirEntry.stat 的 ino 恒为 0、inode 去重塌成 1、遍历少算体积。
 agent_created: true
 ---
 
@@ -93,6 +93,26 @@ agent_created: true
   `py -0p` 里出现的路径**可能根本不存在**（卸载残留的注册项），所以它只能当线索不能当结论——真正判据是 `<那个路径> -c "print(1)"` 的退出码。
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · python 3.12.10 · pandas 3.0.5 · 2026-09-18
 - **复测确认（2026-09-18）**：`py -0p` 列出 3 项（3.13、3.12*、uv 自带），其中 3.13 项路径执行 `-c "print(1)"` 实测**退出码 127**（路径不存在）、3.12 项退出码 0——"启动器列表含死路径"当场实证。
+
+## 9. Windows 上 `DirEntry.stat(follow_symlinks=False)` 的 `st_ino` 恒为 0：按 inode 去重的递归会静默塌成 1 个
+
+- **现象**（本机实测）：给递归扫描器加"用 `(st_dev, st_ino)` 做键、防目录循环"的防护，键取 `e.stat(follow_symlinks=False)`。结果：**同一个目录下的 6 个子目录拿到完全相同的键**（`dev=0, ino=0`），`if key in seen: continue` 把后续所有目录整体跳过。一次 192 个技能 / 221.76 MB / 1073 文件的盘点，被报成 **5.61 MB / 11 文件**——**无异常、无报错，只是数字小了 40 倍**；按它写出的报告会告诉你"这个目录几乎不占空间"。（本次是靠 `du -sh` 交叉核对才抓到的。）
+- **根因**：Windows 上 `os.DirEntry.stat(follow_symlinks=False)` 走的是"不解析重解析点"的取属性通道，这条通道**不回填 `st_dev` 与 `st_ino`**，两者恒为 0；`st_ino == 0` 时所有目录共用同一个键，去重集合塌成 1。对照实测：同一批目录用 `os.stat(e.path, follow_symlinks=False)` 或 `os.lstat(e.path)` 得到**互不相同**的真实 inode（去重集合 6/6）——差别只在"从 `DirEntry` 缓存里取"还是"按路径再 stat 一次"。
+- **对策**：① 要用 inode 当键，就现取 `os.stat(e.path, follow_symlinks=False)`（或 `os.lstat(e.path)`），不要用 `e.stat(follow_symlinks=False)`；② 只在 `st_ino != 0` 时把它放进集合（`0` 当作"此平台不提供"，退化为按路径去重）；③ 遍历结束后**必须做一次数量与体积的独立交叉核对**（`du -sh`、`find | wc -l`、或换一条通道重数一遍）——这类塌缩不报错，只有第二个数字能抓它；④ 别把"防循环"和"去重"绑在同一个键上：直接入口用 `os.path.realpath` 的 visited 集 ＋ 深度上限更稳（junction 本身的读法见 `shell-quoting-and-path-forms §12`）。
+- **判定**：贴进终端即跑——
+  ```python
+  import os
+  d = r"<装了很多子目录的目录>"
+  with os.scandir(d) as it:
+      es = [e for e in it if e.is_dir()]
+  kd = {(e.stat(follow_symlinks=False).st_dev, e.stat(follow_symlinks=False).st_ino) for e in es}
+  ko = {(os.stat(e.path, follow_symlinks=False).st_dev, os.stat(e.path, follow_symlinks=False).st_ino) for e in es}
+  print("DirEntry.stat 去重键数 =", len(kd), "/", len(es))
+  print("os.stat     去重键数 =", len(ko), "/", len(es))
+  print("DirEntry.stat 是否全体 ino==0 =", all(e.stat(follow_symlinks=False).st_ino == 0 for e in es))
+  ```
+  第一行数字**远小于**第二行（或最后一行打印 `True`）⇒ 命中本条（换 `os.stat` 写法即可）；两行相等且等于子目录数 ⇒ 你的写法没问题。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Python 3.12.10 · 2026-09-18
 
 ## 复用信号
 
