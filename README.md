@@ -43,6 +43,8 @@ cp -r skills/* ~/.claude/skills/
 - 例子中的账号、端口、目录一律是占位符（`<owner>/<repo>`、`<端口>`、`<项目>`）。
 - 自查：`python scripts/check.py selftest`（先证明过滤器会响），再 `python scripts/check.py check`
   （结构 / 引用 / 行尾 / 出站红线）。它自带正负对照，所以那个 `0 error` 才是结论而不是沉默。
+  这两条在每个 PR 与 `main` 推送上由 CI 复跑一遍，但 CI 拿不到 gitignored 的个人清单，
+  **远端绿灯不能替代你本地那一遍**（见 `CONTRIBUTING.md`）。
 
 ## 这些结论从哪来，边界在哪
 

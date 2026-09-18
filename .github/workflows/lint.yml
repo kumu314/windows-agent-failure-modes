@@ -1,0 +1,24 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  gate:
+    # The lint is pure text scanning, so it does not need a Windows runner even
+    # though every claim in the pack is Windows-specific.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prove the gate reacts
+        run: python scripts/check.py selftest
+      # Not --strict: 42 sections legitimately lack an environment stamp, and
+      # back-filling them in bulk would fabricate measurements.
+      - name: Check the pack
+        run: python scripts/check.py check
