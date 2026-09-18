@@ -1,6 +1,6 @@
 ---
 name: git-ref-plumbing-on-windows
-description: Git for Windows / Git Bash 里 git 引用层与索引层的静默失效，以及 plumbing（write-tree/commit-tree/update-ref/read-tree）提交的安全用法。绕开正常 checkout、手搓提交、批量删分支、回滚之前读。触发词：update-ref 无效、unborn branch、checkout -b 回滚、commit-tree、write-tree、索引残留、文件莫名被删、packed-refs、worktree、force-with-lease、git add -A、误删分支。
+description: Git for Windows / Git Bash 里 git 引用层与索引层的静默失效，以及 plumbing（write-tree/commit-tree/update-ref/read-tree）提交的安全用法。绕开正常 checkout、手搓提交、批量删分支、回滚之前读。触发词：update-ref 无效、unborn branch、checkout -b 回滚、commit-tree、write-tree、索引残留、文件莫名被删、packed-refs、worktree、force-with-lease、git add -A、filter-branch -d、TMP_DIR。
 agent_created: true
 ---
 
@@ -117,5 +117,43 @@ agent_created: true
 
 - **状态**：复盘条目（本节复测必须对真远端发 GET/DELETE 并 push 删分支；push 权限只在维护者手里、且删除不可逆，按派活约定不在临时副本里伪造远端 API 场景，故本轮不落戳，保留原结论待有权限时补测）。
 
+## 11. `-d` 传给 `git filter-branch` 的是它要 `rm -rf` 的临时目录：配 `-f` 时你的输入文件会先被删掉，而命令退出码 0
+
+- **现象**：把一份清洗脚本的路径传给了 `-d`（`git filter-branch -f -d <脚本路径> …`）。命令**退出码 0**，stderr 只有一句 `WARNING: Ref 'refs/heads/main' is unchanged`，读起来像"没什么可改的空跑"。紧接着 `python <脚本路径>` 报 `can't open file … No such file or directory`，盘符绝对路径 / 相对路径 / MSYS 形态三种写法全都读不到——**被删的是输入，不是"没产出"**。代价：那份脚本未跟踪、git 里没有对象，永久丢失。
+- **根因**：`-d <directory>` 声明的是 filter-branch **自己的临时目录**（`--tree-filter` 在里面 checkout），不是输出目录。本机 git 2.53.0.windows.2 的 `$(git --exec-path)/git-filter-branch` 里删它有三处：启动期 `rm -rf "$tempdir"`（**只在 `case "$force" in t)` 分支里**）、退出 trap `trap 'cd "$orig_dir"; rm -rf "$tempdir"' 0`（无条件）、收尾再一次。默认值 `tempdir=.git-rewrite`（相对当前工作目录）。**启动前的防护是 `test -d "$tempdir" && die "$tempdir already exists, please remove it"`——它只认目录**：路径是普通文件时防护根本不触发，`-f` 那条 `rm -rf` 照样把它删掉（`rm -rf` 对文件同样有效），随后 `mkdir -p "$tempdir/t"` 在同位置建出一个目录，退出时再连目录一起清掉。用法行只有 `[-d <directory>] [-f | --force]`，一个字没提"会被删除"，所以查 `-h` 挡不住这条；而且 `-h` 自己会先打印 `Proceeding with filter-branch...`，它不是纯读命令。
+- **实测矩阵**（一次性 clone，2 笔提交，未跟踪哨兵；`--index-filter 'true'` 为空操作）：
+
+  | 形态 | 退出码 | 哨兵终态 | 信号 |
+  |---|---|---|---|
+  | 不传 `-d` | 0 | — | filter 内 `pwd` 读出 `<仓库根>/.git-rewrite/t`；跑完 `.git-rewrite` 不存在 |
+  | `-d <文件>`，**无** `-f` | **1** | **存活** | `mkdir: cannot create directory '<文件>': Not a directory` |
+  | `-d <文件>` **+** `-f` | **0** | **消失** | 只有 `WARNING: Ref … is unchanged` |
+  | `-d <文件>` + `-f`，且 filter 立即 `exit 7` | **7** | **仍然消失** | 改写尚未发生 ⇒ 删除在启动期，不在收尾 |
+  | `-d <已存在的空目录>`，无 `-f` | **1** | 目录存活 | `<目录> already exists, please remove it` |
+  | `-f -d <非空目录>`（内含一个在意的文件） | **0** | **目录连内容一起没了** | 同上，无任何"删除"字样 |
+  | `-d <尚不存在的路径>`，无 `-f` | 0 | git 自建自清，可连续跑两次 | 无 |
+- **对策**：
+  - **优先不传 `-d`**：默认临时目录与仓库同盘、由 trap 自动清理，没有和输入重合的机会。
+  - 确实要换盘（仓库在无执行权限盘 / 慢盘上）：**传一个尚不存在的路径，并且不要预先 `mkdir`**——实测预先建目录会让命令在没有任何改写的情况下退 **1**（`already exists`），这条直觉对策是错的。要可重复就别加 `-f`；加了 `-f` 就等于授权它删这个路径。
+  - **前置检查（跑之前必过，逐条回显读数）**：
+    ```bash
+    ( TMP="<要传给 -d 的路径>"        # 不传 -d 时按默认填 .git-rewrite
+      TOOL="<清洗脚本路径>"           # 必须在 TMP 之外
+      [ -e "$TMP" ] && { echo "REFUSE: -d 目标已存在（文件会被删 / 目录报 already exists）"; exit 1; }
+      [ -f "$TOOL" ] || { echo "REFUSE: 输入脚本不在场"; exit 1; }
+      echo "OK tmp_absent=$TMP tool=$TOOL" ) ; echo "precheck_exit=$?"
+    ```
+    尖括号占位符**必须加引号**再写进 bash（见本文件 §8 末条），否则 `<` 变成输入重定向、整条命令被静默改掉。
+  - **回滚路径**：被删的是**未跟踪文件**，git 里没有它的对象，`git checkout` / `git reset` 一律救不回 ⇒ 事前把工具脚本放在**仓库与工作目录之外**的固定工具目录，跑完立刻 `[ -f "$TOOL" ]; echo "still_there=$?"` 复核；已经吃掉的只能重新生成或从编辑器历史取，不要在 git 里找。判据：`-f` 用完后凡是 `-d` 给过的路径**一律当作已被删除**。
+- **判定**：不背行号，跑版本无关的源码判据（命中数 >0 即确认 `-d` 是删除目标）：
+  ```bash
+  F="$(git --exec-path)/git-filter-branch"
+  echo "F=$F exists=$([ -f "$F" ] && echo Y || echo N)"
+  grep -c 'tempdir="\$OPTARG"\|rm -rf "\$tempdir"' "$F"
+  ```
+  本机实测输出 **4**（行号 168 赋值 / 223 启动期删除 / 237 trap 删除 / 657 收尾删除；默认值行 115 不匹配这个式子）。取路径**别用 `F=$(ls …)`**：本机 `ls` 带类型后缀，会把 `git-filter-branch` 打成 `git-filter-branch*`，随后 `grep: … No such file or directory`、退出码 **2**，而 `git --exec-path` 无此问题。安全复测照上面矩阵：一次性 clone + 一个哨兵**空文件**，跑完读 `[ -e <哨兵> ]`，**不要拿真脚本试**。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37（MSYS 3.6.6）· git 2.53.0.windows.2 · 2026-09-18 首发（真实代价：一份清洗脚本被 `-f -d` 吃掉），2026-09-19 一次性 clone 复测七态并更正根因与对策
+- **与首发稿不一致处**：首发记为"收尾无条件 `rm -fr`"。复测更正为两支——启动期那次**只在 `-f` 下**执行（无 `-f` 时文件存活、命令退 1 并报 `Not a directory`），退出 trap 那次才是无条件；首发稿的对策"先 `mkdir -p <dir>` 再传 `-d`"实测**反而必退 1**，正确做法是传一个尚不存在的路径。
+
 ## 复用信号
-"`git` 说成功了但分支不存在""提交里多了没改的文件""满屏 D""ref 怎么改都不动""这个提交没有父" → 先当作 `.git` 状态问题，按 §1/§2/§4 逐层验，不要用"再试一次"代替读状态。
+"`git` 说成功了但分支不存在""提交里多了没改的文件""满屏 D""ref 怎么改都不动""这个提交没有父""命令退出码 0 但我的脚本不见了" → 先当作 `.git` 状态问题，按 §1/§2/§4 逐层验；凡是绕开正常流程改写 `.git` 的操作（§2、§11），不要用"再试一次"代替读状态。
