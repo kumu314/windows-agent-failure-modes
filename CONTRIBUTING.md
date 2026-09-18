@@ -60,5 +60,11 @@ python scripts/check.py check      # 结构 / 节号 / 跨引用 / 行尾 / 出�
 
 - 一个 PR 只动一个主题，不顺手重排目录或改命名。
 - **不改已推送的历史**（不 rebase 公共分支、不 `--amend` 别人能看到的提交）。
+  - **一次性例外（落库 2026-09-19，裁定 2026-09-18）**：为清除公开历史里的**真实身份痕迹（即上面「四条红线」第 1 条所列那一类）**，`main` 被 `git filter-branch` 重写了一次。范围要精确：**19 处命中，分在 12 个载体对象**（11 个旧版本 blob + 1 条 commit message；按"词 × 载体对象"数是 14）。四类字面量换成占位符，其它内容一个字节都没动。
+    本例外**只由"公开历史里出现红线第 1 条所列痕迹"触发**；"整理提交""合并主题""补历史戳"一律不算理由。越界判据写成硬标准：**改写前后 `main` 的 tip tree 必须逐字节相同**（本次两侧同为 `6e82677e…`）——凡是让内容发生变化的"改写历史"，都不在本例外范围内。
+    手段上只用 `--index-filter` 与 `--msg-filter`，**不用 `--tree-filter`**：它要 checkout，会撞上上面那条 LF 规则而静默重排字节、改出另一套哈希。
+    第 6 笔提交起 sha 全变（前 5 笔不含字面量），旧 tip 及其全部后代失效。协作者执行前先自证本地无未提交改动（`git status --porcelain` 必须为空），再 `git fetch && git reset --hard origin/main`；**不要 `git pull`**——pull 会把旧 DAG merge 回来，把刚清除的字面量重新带进历史。推送用 `--force-with-lease=main:<改写前 tip>`，把"远端仍是未改写状态"变成前提，期间有人抢先推就失败而不是静默覆盖；回滚路径是改写前那份 `git bundle create` 的完整备份（必要时 `git fetch <pre.bundle> main:refs/heads/main` 再按同样的 lease 推回）。
+    这次买到的东西也要说准：**清除的是别人的真名与机器痕迹，不是"维护者是谁"**——仓库账号与用户 ID 仍在全部提交的 author/committer 里；且服务端在自身 GC 前仍可能按旧 sha 提供那些对象。这两项不在本例外能负责的范围内。
+    - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · git 2.53.0.windows.2（本机无 `git filter-repo`）· Python 3.12.10 · 2026-09-19
 - 文本一律 LF，交给 `.gitattributes` 管（Windows 上 Git 默认 `core.autocrlf=true`，不设这个文件会在 `git add` 时静默改字节）。
 - 例外：含中文的 `.ps1` 示例需要 BOM，见 `windows-text-encoding §1`。
