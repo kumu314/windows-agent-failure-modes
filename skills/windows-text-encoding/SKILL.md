@@ -153,7 +153,35 @@ agent_created: true
   本机可用工具边界（判定链依赖它们）：`iconv`/`jq`/`bc`/`rev`/`pwsh` **都不存在**，所以"Git Bash 里一行转码"这条路直接不可用，跨码页转换只剩显式两端指定（Python `encoding=`，或实测可用的 `node -e "new TextDecoder('gbk').decode(...)"`，本机 Node 带全 ICU）；`file -b` 会把 GBK 报成 `ISO-8859 text`，不可信；取字节用 `xxd`（Git Bash）或 `Format-Hex`（仅 PowerShell 内）。另注意 `python3` 在本机是 0 字节 App Execution Alias 壳（`--version` 零输出、**exit 49**——这个数还随"谁在读"变，PowerShell / Node / `.bat` 内 `ERRORLEVEL` 读到的是 **9009**，见 `runtime-resolution-and-abi §1`；`Length=0` + `ReparsePoint` 同节），`py -3` 指向一个不存在的路径、**exit 101**，且它报错末尾那串 `?` 是**生产端就已经写出的 `3f` 真字节**、不是显示层（见 runtime-resolution-and-abi §2）——所以本节所有 Python 读数都是用 PATH 里第一个真解释器（3.12.10）取的。调 `cmd` 取"第三个客户端"的读数时也别裸写 `cmd /c "…"`：MSYS 会把 `/c` 当路径重写掉，结果起了个交互式 cmd、**照样 exit 0** 且一个文件都没落（实测），必须加 `MSYS_NO_PATHCONV=1`（见 shell-quoting-and-path-forms §7）。
 - **验证于**：Windows 11 家庭版 中文版 10.0.26200.9457（zh-CN，ACP=OEMCP=936，`Get-Culture`/`Get-WinSystemLocale`/`Get-UICulture` 均 zh-CN，注册表 `Nls\CodePage` 的 ACP/OEMCP 都 936 = 没开系统级 UTF-8） · Git Bash 5.2.37(1)-release(x86_64-pc-msys) / MINGW64_NT-10.0-26200 / MSYS 3.6.6，本会话 `LANG`/`LC_ALL=C.UTF-8` 为父进程注入（`env -u LANG` 后 Git Bash 自己给 `zh_CN.UTF-8`，两种取值下 `printf` 落盘字节完全相同） · Windows PowerShell 5.1.26100.9444（本机无 pwsh 7） · Python 3.12.10（`<用户名>\AppData\Local\Programs\Python\Python312\python.exe`） · Node v24.18.0 · git 2.53.0.windows.2 · 2026-09-17 首发 · 2026-09-18 独立复跑：本会话 ambient **未**设 `PYTHONUTF8`/`PYTHONIOENCODING`（`utf8_mode=0`，四个值与原文逐字一致），上面那张三行环境变量对照表是当天新测；据此在岔 4 前加了前置量读数。
 
+## 9. `.bat` 里的非 ASCII 注释：无 BOM 也照样坏——cmd 按 GBK 逐字节错位解析，注释残片被当成命令执行
+
+- **现象**（本机实测，一次烧掉整轮自启动验收）：一个**无 BOM、UTF-8、内容语法全对**的 `run_daemon.bat`，注释行里含中文与 em-dash（`—`）。cmd 跑起来打出 `'-bridge' 不是内部或外部命令`、`TAIL: cannot open 'timestamp,'` 之类的错——**注释文本被执行了**，真正的启动命令根本没轮到，守护不启动，而外层重启循环还每 10 秒忠实地再撞一遍。
+- **根因**：cmd 按**系统 ANSI 代码页（本机 cp936/GBK）逐字节**解析 `.bat`。UTF-8 的中文/全角破折号字节流（如 `e4 b8 ad`）喂给 GBK 解码器时，某些字节会被当作 **GBK 双字节词的前缀字节**，把后一个字节吞进来配成一个汉字——被吞的可能是 `\r` 或 `\n` 或下一条注释的首字节，于是**从那一行起解析窗口整段错位**：`::` 注释的行连接结构被破坏，注释残片落到"命令"的位置上被执行。与 §1 的 BOM 坑是**两个独立机制**：BOM 支坏在**首行**（`'﻿@echo' 不是命令`，一眼能定位）；本支坏在**任意非 ASCII 字节所在行及其后**，前面几十行都正常，看起来像"偶发语法错"。
+- **对策**：`.bat` 一律 **纯 ASCII + CRLF**——注释也用英文写；要中文说明写进同目录的 `.md`，由 bat `echo` 一个英文提示指过去。从 bash/heredoc 生成 bat 的固定收尾：写完立刻 `sed -i 's/\r*$/\r/' file.bat`（补 CRLF，幂等），再跑一条 ASCII 断言（见判定）。这也解释了 §1 对策里"注释尽量纯 ASCII"那半句——它不是风格建议，是本条的预防措施。
+- **判定**：落盘后、注册前，两条各 5 秒：
+  ```bash
+  grep -nP '[^\x00-\x7F]' run_daemon.bat        # 必须 0 命中；有输出即命中本条（哪怕只出现在注释里）
+  od -An -tx1 run_daemon.bat | grep -c '0d 0a'  # >0 = CRLF 在；为 0 先补 sed 那条
+  ```
+  运行侧的确诊信号：cmd 报错文案里出现**你自己注释里的词**（本例 `'-'`、`'TAIL:'` 都来自注释句）⇒ 不是命令写错了，是解析错位，改文件编码形态而不是改命令。
+- **验证于**：Windows 11 家庭中文版 10.0.26200（ACP=936）· cmd 10.0 · Git Bash 5.2.37 · 2026-09-19
+  （实测：含中文+em-dash 注释的 bat 打出 `'-bridge' 不是内部或外部命令`；重写为纯 ASCII+CRLF 后同一台机同一任务正常拉起守护，日志尾部时间戳为证。未对"哪个字节序列必然吞换行"做逐字节复现——判定用上游 grep 即封死，不必依赖具体错位模式。）
+
+## 10. 文本模式 `open()` 整文件读写：只想插几行，落盘却把全文件行尾翻译了一遍
+
+- **现象**（本机实测，一次让五份镜像副本同时字节级冲突）：用 Python 往一份 LF 的共享 `SKILL.md` 里插 4 行，读写都只写了 `encoding='utf-8'`。改后字节数 14387 → **15772**（+1385 ≈ 行数），`CR` 计数 0 → **1438**（= 行数），`git diff` 显示"整个文件删除 + 整个文件新增"，而真实意图只是 +4 行；这份文件另有若干份由同步脚本扇出的镜像副本，于是一次插入变成五处逐字节不一致。用 `difflib` 按行比对却"看不出内容变了"——因为变的不是内容，是行尾。
+- **根因**：Python 文本模式有**两道默认翻译，都不报错**：读侧 universal newlines 把盘上的 `\r\n` 折成内存里的 `\n`，写侧再按平台默认（Windows 的 `os.linesep` = `\r\n`）把 `\n` 翻译回去。所以"读→改一小段→写"这条最自然的写法，等价于**把整个文件按当前平台的行尾重新编码一遍**。与 §7 同类但在另一头：§7 是 git 在 `add` 时按 `core.autocrlf` 转换（工作树字节 ≠ blob 字节，`git status` 还说干净），本条是**编辑进程自己**当场改了盘上字节，git 会老实报"整文件变更"。与 python-silent-data-errors §2（`csv.writer` 漏 `newline=''` 导致每行后多一个空行）同一机制、不同症状：那条只影响"库自己已经写了 `\r\n`"的场合，本条影响任何整文件读写。
+- **对策**：整文件改写一律**显式钉死行尾**——读 `open(f, encoding='utf-8', newline='\n')`（或 `newline=''` 干脆不翻译），写 `open(f, 'w', encoding='utf-8', newline='\n')`；或走二进制 `read_bytes`/`write_bytes`，只在字节层做替换。能用"只替换目标串"的语义化编辑工具就别重写整个文件。共享文件改前必备份，改后必须过下面那两条判定再说完成。
+- **判定**（各一秒，别靠肉眼看 diff）：
+  ```bash
+  tr -dc '\r' < SKILL.md | wc -c   # 改前改后必须同一读数（本机这批共享 md 全是 0）
+  wc -c < SKILL.md                 # 增量应等于"你想插的字节数"，不是整文件大小
+  ```
+  两条任一不对即命中本条：还原备份，加 `newline='\n'` 重跑。参照实测：第一遍 CR=0→1438、字节 +1385；改成 `newline='\n'` 后同一插入为 **CR 仍 0、+4 行 / −0 行**，与镜像副本重新一致。
+- **验证于**：Windows 11 家庭中文版 10.0.26200（ACP=936）· Python 3.12.10 · Git Bash 5.2.37 · 2026-09-19（六份共享 `SKILL.md` 批量插入那一轮：第一遍全文件 CRLF 化，从备份还原后改 `newline='\n'` 重跑，逐份核对 CR=0 与 +4/−0）。
+
 ## 复用信号
 "改完脚本没生效""只有中文出错""同一文件我看得懂下游看不懂""读到一串问号""解码没报错但内容是乱的" → 一律先取字节再看，别在文本层推理。
+- "只想加两行、diff 却把整个文件划掉了""改完几份镜像副本全说内容不同""按行 diff 看不出变化但字节数涨了" → §10（文本模式 `open()` 自己翻译了整文件行尾，落盘前后必须比 CR 数与字节增量）。
 - "本地文件哈希和仓库 blob 哈希对不上、但 `git status` 说干净""clone 出来的文件字节数和上游不一样""`git add` 一个字没说、push 上去的内容却变了""`i/lf w/crlf` 这种字段看不懂" → §7（`core.autocrlf` 在转换管道里静默重写行尾，git 侧信号全部报"相同"）。
 - "同一句话在 bash 里是 UTF-8、在 PowerShell 里变 UTF-16、在 Set-Content 里变 GBK""退出码 0 但中文成了问号""Get-Content 读回来再写回去就坏了" → §8（默认编码是每个客户端各自的默认值，退出码不参与判定）
