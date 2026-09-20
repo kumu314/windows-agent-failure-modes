@@ -29,20 +29,39 @@ agent_created: true
 - **对策**：读 `Get-Content -Raw -Encoding UTF8`；写用显式 UTF-8（要 BOM 用 `New-Object System.Text.UTF8Encoding($true)` + `[IO.File]::WriteAllText`）。日志追加同样显式 `-Encoding UTF8`。
 - **判定**：怀疑"内容坏了"之前先分清是显示层还是字节层——
   `python -c "b=open(p,'rb').read(); print(b.decode('utf-8')[:80])"` 能正常解出中文 = 只有控制台坏；解出的是乱码 = 文件本身已损坏，立刻停止再写。
+- **复测细节（2026-09-21，两份只差一个字符的对照，证明损坏不依赖"内容里有 GBK 装不下的字符"）**：内容含 GBK 表外字符 U+2212 的那份 75 → 74 字节；**全部落在 GBK 内**的那份 73 → 73 字节——长度一位没变，却**同样两头解不出**（按 utf-8 解在偏移 40-41 `invalid continuation byte`，按 gbk 解在偏移 16 `illegal multibyte sequence`）。默认读入报回 42 字符而真实 31 字符，这就是"读错表"的直接证据。**所以判据是"两头都解不出"，不是"文件变短了"**；按行 diff 看那份 73 字节的还像是"没改动"。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（zh-CN，ACP=936） · Windows PowerShell 5.1.26100.9444（`Get-Content -Raw` 不带 `-Encoding` / `Set-Content` 不带 `-Encoding`，`[Text.Encoding]::Default.WebName` = `gb2312`） · Python 3.12.10（字节层断言与两种解码对照） · 2026-09-21。显式 `-Encoding UTF8` 那侧同时复测：读回 31 字符（正确），写出 78 字节、首三字节 `efbbbf`，按 `utf-8-sig` 解出原文——即 PS5.1 的 `-Encoding UTF8` 写的是**带 BOM** 的 UTF-8。
 
-## 3. 终端乱码不是文件坏：控制台代码页
+## 3. 终端乱码不是文件坏：先问 stdout 接的是控制台还是管道
 
-- **现象**：脚本、文件、结果都对，只有终端里的中文是乱码；或 Python 打印中文抛 `UnicodeEncodeError`，而 `open(..., encoding='utf-8')` 写文件毫无问题。
-- **根因**：控制台代码页非 UTF-8。中文 Windows 上常见 `sys.stdout.encoding=gbk`、`locale=cp936`，而文件系统编码是 utf-8——**坏在 print，不坏在 open**。
-- **对策**：`chcp 65001` 后再看；或者干脆以脚本生成的报告文件为准（长输出本来就该落文件而不是靠终端）。Python 侧 `sys.stdout.reconfigure(encoding='utf-8', errors='replace')`。
-- **判定**：`python -c "import sys,locale;print(sys.stdout.encoding, sys.getfilesystemencoding(), locale.getpreferredencoding())"` —— 三个值不一致即命中，且第一个才是终端。
+- **现象**：脚本、文件、结果都对，只有终端里的中文是乱码；或者 Python 打印**含 GBK 表外字符**的内容（`░`、`▒`、emoji、生僻字、非中日韩符号）抛 `UnicodeEncodeError: 'gbk' codec can't encode character ...`，而 `open(..., encoding='utf-8')` 写文件毫无问题。**纯中文一般不抛**——GBK 覆盖常用汉字，它只是静默变乱码，别把"没报错"读成"没坏"。
+- **根因**：`sys.stdout.encoding` 由 stdout **接到什么**决定，不由"这台机器是中文 Windows"决定。实测两路（机制层面 CPython 3.6+ 的控制台 I/O 走 UTF-16 写入，与下面第一行读数一致；机制这条是文档口径，本轮只取读数）：
+
+  | stdout 接的东西 | `sys.stdout.encoding` | `isatty` | `GetConsoleOutputCP()` | `locale.getpreferredencoding()` | 文件系统编码 |
+  |---|---|---|---|---|---|
+  | 真控制台（`Start-Process cmd -WindowStyle Hidden` 起的独立控制台） | **`utf-8`** | True | 936 或 65001 | `cp936` | `utf-8` |
+  | 管道 / 重定向到文件（agent 取输出的常态） | **`gbk`** | False | 936 | `cp936` | `utf-8` |
+
+  所以**坏在 print 的管道那条路，不坏在 open**；控制台下 CPython 根本不走代码页。
+- **对策**：
+  - 管道侧要正常 UTF-8 输出：`PYTHONIOENCODING=utf-8`（实测三元组从 `gbk utf-8 cp936` 变 `utf-8 utf-8 cp936`），或 `sys.stdout.reconfigure(errors='replace')`。**但 `errors='replace'` 出来的不是干净问号串**：`print('░▒▓')` 的原始 stdout 字节实测是 `3f 3f a8 88`——`░`、`▒` 折成 `?`，而 `▓` 在 GBK 表内被正常编成两字节；下游按 UTF-8 解照样炸（`0xa8 0x88` 解不进 GBK）。要干净就 `errors='backslashreplace'`（同一句实测出 `\u2591\u2592` + `a8 88`），或直接 `encoding='utf-8'`。
+  - 长输出落文件、以报告文件为准（这条任何时候都对）。
+  - **`chcp 65001` 不是 Python 侧的对策**（本轮实测推翻原写法）：控制台侧 `ConsoleOutputCP` 由 936 → 65001，`sys.stdout.encoding` 两档都恒 `utf-8` 纹丝不动；管道侧三元组两档完全相同。它改的是**代码页本身**，而 CPython 的 print 在控制台下不查它——所以"先 `chcp` 再看就不乱码"这条不能再当作 Python 的修法（§8 另有一条同向实测：改完码页 `Set-Content` 落盘字节照旧是 `d6 d0 ce c4…`）。
+- **判定**：三值 + `isatty` 一起取，**并记下取的时候 stdout 接的是什么**——同一个三元组在两种宿主下含义相反（同族：`runtime-resolution-and-abi §1`「退出码随谁在读而变」、`runtime-resolution-and-abi §7`「测量工具静默消解被测对象语义」）：
+  ```bash
+  python -c "import sys,locale,ctypes;print(sys.stdout.encoding,sys.getfilesystemencoding(),locale.getpreferredencoding(),'isatty=%s'%sys.stdout.isatty(),'CP=%d'%ctypes.windll.kernel32.GetConsoleOutputCP())"
+  ```
+  `isatty=False` 且第一值 `gbk` 且待打内容含 GBK 表外字符 = 命中；`isatty=True` 时第一值恒 `utf-8`，"三值不一致"是**无害**的，别拿它当故障证据。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（zh-CN，ACP=OEMCP=936） · Python 3.12.10（控制台/管道两路各取，控制台侧由 PowerShell `Start-Process cmd.exe -WindowStyle Hidden -Wait` 起独立控制台并在其中 `chcp 65001` 前后对照） · Windows PowerShell 5.1.26100.9444 · 2026-09-21。**本节据本轮实测改写**：原文"`sys.stdout.encoding=gbk`"（只在 stdout 非控制台时成立）、"`chcp 65001` 后再看"（对 CPython 无作用，实测）、"三个值不一致即命中且第一个才是终端"（第一个恰是管道读数）三处与实测不符。**未验证**：终端"看着是乱码"的显示层本轮无像素级读数，本节全部断言停在字节/异常层。
 
 ## 4. 编码兜底代码被自己的异常处理吃掉（活体级陷阱）
 
-- **现象**：脚本开头明明写了 `try: sys.stdout.reconfigure(errors='replace') except Exception: pass`，中文照样崩，而且**没有任何报错线索**——同目录结构相同的另一个脚本却是好的。
+- **现象**：脚本开头明明写了 `try: sys.stdout.reconfigure(errors='replace') except Exception: pass`，打印照样崩，而且**没有任何报错线索**——同目录结构相同的另一个脚本却是好的。
 - **根因**：那个文件根本没有 `import sys`，`NameError` 被 `except Exception: pass` 静默吞掉，兜底变成 no-op；对照脚本导了 `sys` 所以正常。三层不可见叠加：默认 GBK 不报错 + 兜底被吞 + 差异只在逐文件比对才看得见。
+- **适用范围（本轮补）**：崩不崩取决于 stdout 接的是什么——**只在管道/重定向下成立**（`isatty=False`、`encoding=gbk`）；真控制台侧 CPython 走 UTF-16，同一份脚本根本不抛（见 §3 的对照表）。所以这条陷阱专属于"agent 取输出 / 落文件"这条路，而那正是自动化最常走的一条。同理，触发字符得是 **GBK 表外**的（实测 `░` 抛、纯中文不抛）。
 - **对策**：**必须生效的初始化不要包在裸 `except: pass` 里**（要么收窄到 `except (AttributeError, ValueError)`，要么失败即打印并退出）；兜底代码和被兜底的资源要在同一处 review。
 - **判定**：`grep -n "^import sys" <那个文件>`（没输出 = 兜底必然失效）；再 `python -c "import ast,sys;..."` 或直接跑一次看是否抛 `NameError`。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（ACP=936） · Python 3.12.10 · Git Bash `grep -n "^import sys"` · 2026-09-21。三份同构脚本各跑一次（stdout 为管道）：无 `import sys` 的裸兜底版 → 退出码 1，`UnicodeEncodeError: 'gbk' codec can't encode character '\u2591'`（NameError 被吞，无任何线索）；有 `import sys` 版 → 退出码 0；把兜底收窄成 `except (AttributeError, ValueError)` 且仍不导 `sys` 版 → 退出码 1，`NameError: name 'sys' is not defined. Did you forget to import 'sys'?`（失败可见 = 收窄生效）。`grep -n "^import sys"` 只在那一份"有 import"的文件命中（`文件:1:import sys`），另两份零命中，与退出码结果一一对应。**取证注意**：`grep` 那步必须显式走 `bash -c`；同一句交给 `subprocess(shell=True)`（Windows 上是 cmd.exe）时，`; echo GREP_RC=$?` 会被 cmd 原样留下、被 grep 当成三个文件名，报 `No such file or directory` 退出码 2（本轮第一版就坏在这里）。
 
 ## 5. 仓库里的文本资产统一 UTF-8，读侧一律 `utf-8-sig` 打底
 
@@ -50,11 +69,18 @@ agent_created: true
 - **根因**：文件由默认 ANSI 的工具链写出（真字节是 GBK），只有 Windows 本地编辑器会替你兜住；任何 UTF-8 消费者拿到的都是垃圾。
 - **对策**：仓库内文本资产一律 UTF-8（`.ps1` 例外见 §1）；Python 读侧统一 `encoding='utf-8-sig'`（顺带吃掉 BOM，避免 `KeyError: '﻿name'` 这类首键污染）。
 - **判定**：`python -c "b=open(p,'rb').read(); b.decode('utf-8')"` 抛 `UnicodeDecodeError: invalid start byte` → 非 UTF-8；再用 `.decode('gbk')` 解一次，能解出正常文字就是 GBK。
+  **报错后缀别当判据**：实测同一份 GBK 文件抛的是 `can't decode byte 0xca in position 10: invalid continuation byte`（不是 `invalid start byte`）——后缀随出错位置而变，判据只是"抛不抛 `UnicodeDecodeError`"。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（ACP=936） · Python 3.12.10 · 2026-09-21。复测三件：① GBK 那份（首三字节 `7b226e`，无 BOM）按 utf-8 解退出码 1，按 gbk 解出完整 `{"name": "数据管线", "阈值": -2.5}` —— "本地看得懂、UTF-8 下游拿到垃圾"成立；② 带 BOM 那份（首三 `efbbbf`）用 `encoding='utf-8-sig'` 读 → 键正常，用 `json.load(open(p, encoding='utf-8'))` 读 → `json.decoder.JSONDecodeError: Unexpected UTF-8 BOM (decode using utf-8-sig)`，即原文说的"首键污染"在 JSON 侧的实测形态是**直接抛**、在 YAML 侧才是 `KeyError`；③ 见 §2 的 PS5.1 `-Encoding UTF8` 写出必带 BOM，所以"仓库文本资产"被 PowerShell 工具链碰过之后一律用 `utf-8-sig` 打底是必要的，不是保险。
 
 ## 6. 扩展名不是格式证据
 
 - **现象**：有人把 `.xlsx` 直接改名成 `.csv`。按文本读"成功"了，解出一堆乱码行，**不报错**，后续统计全部建立在垃圾上。
 - **根因**：扩展名由人写，格式由字节定。
+- **"不报错"是有条件的**（本轮实测，别把它记成无条件）：同一份 ZIP 伪装文件（首四字节 `504b0304`），
+  - `open(p, encoding='utf-8', errors='replace').read()` → 退出码 **0**、7 行、含 **16** 个 U+FFFD —— 静默垃圾，这才是本节针对的形态；
+  - `open(p).read()`（本机默认 GBK）→ 退出码 **1**，`UnicodeDecodeError: 'gbk' codec can't decode byte 0xb4 in position 10: illegal multibyte sequence`；
+  - `open(p, encoding='utf-8').read()` → 退出码 **1**，`'utf-8' codec can't decode byte 0xb4 in position 10: invalid start byte`。
+  也就是说**抛错是运气，不是防线**：只要调用方（或它用的库）带了 `errors='replace'`/`errors='ignore'`，垃圾就无声通过。反过来说，看到这两条 `UnicodeDecodeError` 也别当成"我已经安全了"——它只证明这份字节连任一表都套不上，不证明扩展名与格式相符。
 - **对策**：读二进制类文件前先嗅探再选引擎：
   ```python
   head = open(path, 'rb').read(8)
@@ -63,6 +89,7 @@ agent_created: true
   ```
   Office 文件本质是 ZIP：`zipfile` + `xml.etree` 直读 `word/document.xml` 往往比装解析库更快更稳（沙箱里装库本身还会失败）。
 - **判定**：`zipfile.ZipFile(p).namelist()` 能列出 `word/document.xml` / `xl/worksheets/` = 它是 OOXML，不管扩展名叫什么。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（ACP=936） · Python 3.12.10 · 2026-09-21。三条全部复跑：嗅探判定 `namelist()` 在同一份 `.csv` 后缀的文件上列出 `['word/document.xml', 'xl/worksheets/sheet1.xml']`（即一次造出两种"改名即失效"的形态，证明判据不看扩展名）；上面那组"默认编码 vs 强制 utf-8 vs replace"的三档退出码/报错文本即本轮取的实数。
 
 ## 7. `core.autocrlf` 在 `git add` 里静默改写行尾：工作树哈希 ≠ blob 哈希，而 git 说"干净"
 

@@ -40,6 +40,7 @@ agent_created: true
 - **根因**：启动器读注册表里的版本登记，卸载不干净的残留项照样列出。
 - **对策**：`py -0p` 只当线索；**要跑就用绝对路径**，或明确指到带 `*`（默认）的那一项。脚本、批处理、计划任务里一律写绝对路径解释器，理由见 §4。
 - **判定**：`"<列出来的路径>" -c "print(1)"` 的退出码才是结论。注册表项在不在、`py -0p` 说什么，都不算。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · `py` 启动器（随 Python 3.12.10 安装） · Git Bash · 2026-09-21。本轮 `py -0p` 列 3 项：第 1 项（默认带 `*` 的那项之外的 3.13）指向 `<盘符>:\<早已卸载的残留目录>\python.exe`，`os.path.exists` = **False**，直接调它 = `FileNotFoundError: [WinError 2]`；另两项 listed 路径存在且 `-c "print(1)"` 退出码 0。`py -3`（跟着默认登记走）退出码 **101**、消息尾部仍是问号串；`py -3.12` 退出码 0。**"退出码才是结论"这条判据成立。** 问号串本轮是在**管道捕获**下取到的，与 `windows-text-encoding §3` 修订后的口径一致（原生启动器按代码页/replacement 写字节，不是 CPython 的 print 路径）。
 
 ## 3. 原生模块的 ABI 是按 Node 版本编译的
 
@@ -54,6 +55,7 @@ agent_created: true
   ```
   报错里的两个数字直接告诉你缺哪一边：`137`（模块需要）vs `127`（当前运行时）。只有确认全机器只有一个 Node 且确实需要更新插件时才 `npm rebuild`——那会改共享依赖，影响别的调用方。
 - **附带**：同一份 `node_modules` 被两个 Node 版本共用时，**任何一方 rebuild 都会让另一方坏掉**。所以多 Node 环境里"共享 node_modules"本身就是坑，各自装各自的。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Node v24.18.0（安装版，本机唯一，`where node` 与 `process.execPath` 同指一处） · Git Bash · 2026-09-21。**范围要划清**：本轮只复测了"判定"那两条命令——`node -p process.versions.modules` = **137**、`where node` 与 `process.execPath` 都只指同一个二进制。**`NODE_MODULE_VERSION 137 vs 127` 那条报错本身没有复现条件**（本机单 Node，且第二台 Node 要装到系统里才能测），所以 §3 的现象段与"127 = Node 22"那一对数字仍出自原始事故记录，**未验证**；本节可复用的只有"先读 `process.versions.modules` 再决定要不要 rebuild"这条判据。
 
 ## 4. PATH 顺序随 shell 变，同一命令在不同会话解析到不同二进制
 
@@ -65,6 +67,7 @@ agent_created: true
   which -a python python3 node npm        # 列出所有候选与优先级
   ```
   多行输出 = 存在解析歧义，必须钉死。**长任务里把实际用的解释器路径打出来**（`sys.executable` / `process.execPath`），这样日志本身能证明跑的是哪个。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37（`which -a`） · cmd（`where`） · Windows PowerShell 5.1.26100.9444（`Get-Command`） · 2026-09-21。本轮歧义复现在 **python** 上不在 node 上，这点按实数写：bash `which -a python python3 node npm` 给 **6 行**（`python` 2 个安装位置 + `python3` 只有 WindowsApps 那个壳 + `node` 1 个 + `npm` 2 个）；cmd `where python`/`where node` 给 **3 行**（python 2 个——它不含 `python3` 那次查询，所以列出的集合与 bash 不同，比较时**得先确认两边问的是同一批名字**）；PowerShell `Get-Command` 里 `python` 与 `python3` 解析到**不同目录**（前者真解释器、后者 §1 那个壳），bash 里 `python3 -c` 直接 **9009**。node 三个 shell 都解析到同一个二进制——**原文"Git Bash 是 A、PowerShell 是 B"这一路本轮未复现**，成立的是"同一类命令在不同 shell 解析结果不同（含'这里根本没有'）"这个更弱的版本 + "多行输出 = 必须钉死"这条判据。
 
 ## 5. `MODULE_NOT_FOUND` 常常不是没装，是解析根不对
 
@@ -72,12 +75,16 @@ agent_created: true
 - **根因**：Node 的模块解析从**脚本所在目录**逐级向上找 `node_modules`，不是从当前工作目录；Python 的 `import` 则受 `sys.path[0]`（脚本目录）影响。把脚本放到临时目录、或从别处调用，就换了搜索根。
 - **对策**：脚本要引用项目依赖时用**绝对路径 require**（或从项目根用相对路径起脚本），或显式设 `NODE_PATH`；Python 侧 `sys.path.insert(0, str(Path(__file__).parent))` 而不是靠 cwd。
 - **判定**：报错信息里会写明它查过哪几个路径——先看那份列表，再决定装不装。缺的是"搜索根"时，重复安装只会掩盖问题，且换个调用方式又复发。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Node v24.18.0 + Python 3.12.10 · Git Bash · 2026-09-21。**两侧都测，且各带一个反向对照**：
+  - Node：包放在 `A\node_modules\tinypkg`、脚本放 A → **cwd 换到别处仍解析成功**（证明根是脚本目录）；脚本放 B（B 及其上级无 `node_modules`）→ `Error: Cannot find module 'tinypkg'` + `code: 'MODULE_NOT_FOUND'`，`requireStack` 明写起点是 `<B>\probe.js`；同一句设 `NODE_PATH=<A>\node_modules` 后恢复解析（`对策` 那条实测有效）。
+  - Python：模块与脚本同目录、cwd 在别处 → import 成功；模块放在 **cwd**、脚本在别处 → `ModuleNotFoundError`。这两条一起才是"搜索根是脚本目录、cwd 不参与"的完整证据，只测第一条不能排除"cwd 也管用"。另注：`python -c` 那侧 `sys.path[0]` 实测是空串 `''`（含义 = cwd），与脚本路径模式不同，**别拿 `-c` 的读数给脚本下结论**。
 
 ## 6. venv 激活脚本在各 shell 里不一样，未激活不等于安全
 
 - **现象**：`pip install` 装到了全局；或者激活了 venv 但 `python` 仍是系统解释器（PowerShell 执行策略挡了 `Activate.ps1`，命令照样"执行成功"）。
 - **对策**：**不依赖激活状态**，直接用 venv 里的解释器绝对路径 `<venv>\Scripts\python.exe -m pip install ...`、`<venv>\Scripts\python.exe script.py`。同理安装依赖永远走 `python -m pip`，让 pip 和 python 必然同前缀。
 - **判定**：`python -c "import sys; print(sys.prefix, sys.base_prefix)"` —— 两者不同才是 venv 里；相同就是系统解释器，装了也白装到项目环境。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Python 3.12.10（`-m venv` 新建，未激活） · 2026-09-21。判定命令两侧各取一次：系统解释器 `sys.prefix == sys.base_prefix`（同一目录）；新建 venv 内的 `<venv>\Scripts\python.exe` 两值不同（`sys.prefix` = venv 根、`sys.base_prefix` = 系统安装目录）。`<venv>\Scripts\python.exe -m pip --version` 报出的 pip 就在 `<venv>\Lib\site-packages\pip`，即"用 venv 解释器走 `-m pip` 必然同前缀"这条对策成立——**全程没有执行任何 Activate 脚本**。**未复测**：`Activate.ps1` 被执行策略拦掉那一岔（属 §7 的范围，本轮没取新读数），以及"激活了但 `python` 仍是系统解释器"的具体现场。
 
 ## 7. PowerShell 执行策略：脚本"根本没跑起来"的四岔定位
 
