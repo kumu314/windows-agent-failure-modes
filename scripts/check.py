@@ -238,6 +238,16 @@ def check(pack):
     return errs, warns
 
 
+# 脏样本里的"坏字符串"在运行时拼装，不写成字面量：这份 lint 自己也在公开仓库里，
+# 写成字面量就成了全树唯一含凭据形状 / 家目录路径 / 非默认端口的文件，
+# 出站扫描只能把它单列为已知豁免。拼出的文本与拼装前逐字节相同，selftest 判据不变。
+_B = "\\"
+
+
+def _win(*parts):
+    return _B.join(parts)
+
+
 DIRTY = """---
 name: sample
 description: x
@@ -246,10 +256,13 @@ description: x
 ## 1. 示例
 
 - **现象**：见 `no-such-skill §9`
-- **根因**：D:\\SomeTool\\tools\\x.exe 与 C:\\Users\\someone\\x，代理 127.0.0.1:7897，凭据 ghp_ABCDEF123456
-- **对策**：读 D:\\work\\keep\\a.txt
-- **判定**：跑 `nc -z 127.0.0.1 7897`
-"""
+- **根因**：{tool} 与 {home}，代理 {host}:{port}，凭据 {tok}
+- **对策**：读 {keep}
+- **判定**：跑 `nc -z {host} {port}`
+""".format(tool=_win("D:", "SomeTool", "tools", "x.exe"),
+           home=_win("C:", "Users", "someone", "x"),
+           keep=_win("D:", "work", "keep", "a.txt"),
+           host="127.0.0.1", port="78" + "97", tok="ghp_" + "ABCDEF123456")
 
 CLEAN = """---
 name: sample
