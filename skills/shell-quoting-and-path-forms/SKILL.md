@@ -1,6 +1,6 @@
 ---
 name: shell-quoting-and-path-forms
-description: Windows 上把文本和路径安全送进 shell 的失效模式。用 heredoc 写脚本、用 python -c 传长文本、往文件追加含反引号或中文标点的正文、Git Bash 里路径写法报错、taskkill/sc/reg 等原生命令传参、含空格目录名传给第三方 CLI 之前先读这条。触发词：heredoc、反斜杠被吞、反引号消失、命令替换、全角符号、cd /d、taskkill 无效、路径被拆开、8.3 短路径、/tmp 找不到、Glob 返回空、md5 对不上、哈希假不等、MAX_PATH、260 上限、长路径看不见。
+description: Windows 上把文本和路径安全送进 shell 的失效模式。用 heredoc 写脚本、用 python -c 传长文本、往文件追加含反引号或中文标点的正文、Git Bash 里路径写法报错、taskkill/sc/reg 等原生命令传参、含空格目录名传给第三方 CLI 之前先读这条。触发词：heredoc、反斜杠被吞、反引号消失、命令替换、全角符号、cd /d、taskkill 无效、路径被拆开、8.3 短路径、/tmp 找不到、Glob 返回空、md5 对不上、MAX_PATH、长路径看不见、属性不存在、全判否。
 agent_created: true
 ---
 
@@ -201,3 +201,57 @@ agent_created: true
 - **判定**：报错里出现 `unknown option 'X'` 且 `X` 是你正文里的某个片段 → 本条命中。
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Windows PowerShell 5.1.26100.9444 · git 2.53.0.windows.2 · 2026-09-19
   （实测：含双引号的 message 报 `unknown option`；改 `git commit -F 文件` 一次成功。报错里的变量名已中性化。）
+
+## 16. PowerShell 方法调用的参数位不能写运算符表达式：报错说"重载找不到"，真因是参数被拆成两个
+
+- **现象**（本机实测）：清理脚本里写
+  ```powershell
+  $stamp = [regex]::Escape($today -replace '-','')
+  # → 找不到“Escape”的重载，参数计数为:“2”。
+  ```
+  报错说的是**重载不存在**，读起来像 `Escape` 这个方法不能这么调；实际是 `-replace` 的逗号被当成了**方法参数分隔符**，`Escape` 收到两个参数。中文区域下这条文案还带**全角引号**（`“Escape”`、`“2”`），拿 `grep -F '"Escape"'` 去搜日志会 0 命中（全角符号破坏可检索性，见 `shell-quoting-and-path-forms §3`）。
+- **根因**：方法调用 `接收者::方法(a, b)` 的参数表按逗号切分，**只做表达式求值**；`-replace`、`-split`、`-join`、`-in`、`-f` 这类**带连字符的操作符是命令形态**，出现在参数位时它自己那套 `操作数1, 操作数2` 的逗号会被上层参数表再切一次。同一个表达式写在赋值右侧（`$x = $today -replace '-',''`）完全合法——所以"这句我单跑过没问题"不能否证本条。
+- **对策**：
+  ```powershell
+  $t = $today -replace '-',''      # ① 先算进变量（可读性最好）
+  [regex]::Escape($t)
+  [regex]::Escape(($today -replace '-',''))   # ② 括号显式成组，实测同样通过
+  ```
+  凡是"方法参数位"要放运算符表达式，一律走这两形之一；**参数位里出现 `-字` 开头的内容时先怀疑本条**。
+- **⚠️ 危险放大在错误偏好**：这类脚本常配 `$ErrorActionPreference='SilentlyContinue'`，于是报错被吞、`$stamp` 变 null、后续按日期挑文件的正则退化成匹配一切（或一切都不匹配），**清理脚本照常打印"完成"**。凡批量删除/搬移前置条件来自一次计算值的，必须**当场回显该值**再进入删除分支。
+- **判定**：报错文案含 `的重载` 或 `overload` 且带 `参数计数为:“N”`，而 `N` 比代码里写的参数个数大 ⇒ 本条命中；逐个检查参数位里是否有带逗号的 `-操作符`。反证一条：把该表达式挪到赋值右侧后错误消失 ⇒ 确诊。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Windows PowerShell 5.1.26100.9444（LanguageMode=FullLanguage）· 2026-09-21
+  （实测三写法：原写法报 `参数计数为:“2”`；先算变量、以及外层再加括号，两种均通过。）
+
+## 17. 属性不存在不报错，只静默给 $null：分类器全判否、整批被跳过，脚本仍报成功
+
+- **现象**（真实事故 + 本机复现）：抓取脚本按扩展名筛文本资产——
+  ```powershell
+  $ext = [System.IO.Path]::GetExtension($b.path).ToLower()
+  if ($TextExt -notcontains $ext) { $binSkip++; continue }
+  ```
+  实跑结果 **整批候选全部走 skip 分支**，汇总打印"成功 0、失败 0"，退出码正常。
+  本机最小复现（两条独立样本，`$Error.Count` 增量为 **0**）：
+  ```powershell
+  foreach ($b in @('x/USAGE.md','a/b/shot.png')) {     # $b 是字符串，没有 .path 这个属性
+    $ext = [System.IO.Path]::GetExtension($b.path).ToLower()
+    Write-Output ("ext=[" + $ext + "] skip")           # → ext=[] 两条都被跳过，无任何报错
+  }
+  ```
+  同族第二形：`ConvertFrom-Json` 出来的对象字段叫 `file_path` 而代码读 `.path` —— 该条静默跳过，另一条正常（**一批里部分对部分错，比全错更难发现**）。
+- **复测更正（与本条原始归因不一致，两版都保留）**：原始 lesson 记为"`[类型]::方法($obj.属性).链式成员()` 这种**调用后链式取成员**被 PowerShell 解析成 null"。本轮**未复现该归因**：同一写法在 `[pscustomobject]` 与 `ConvertFrom-Json` 两种对象上都正常返回 `.md`（PS 5.1.26100.9444 / FullLanguage）。真复现的路径是**属性本身不存在**。原脚本已不可定位，故不坚持原归因；下面按实测机制写。
+- **根因**：非严格模式下，读一个不存在的属性**返回 `$null` 且不产生任何错误记录**（这不是"报错被 `-ErrorAction Continue` 压住了"——是根本没有错误记录，所以任何"看有没有报错"的自检都放行）。`$null` 喂进 .NET 静态方法 → 拿到空串 → 与白名单**永远不相等** ⇒ 每个元素都判否 ⇒ `continue` 分支把整批静默吞掉。两个附带读数：① PowerShell 属性访问**大小写不敏感**（JSON 里是 `Path` 也能被 `.path` 读到），所以"大小写写错"不是原因，**字段名根本对不上**才是；② 纯 PowerShell 命令不设置 `$LASTEXITCODE`，脚本里读到的 `ExitCode` 是空值——拿它当"成功"依据也是假信号。
+- **对策**：
+  ① **脚本开头两行**（实测把静默变成当场失败）：
+  ```powershell
+  Set-StrictMode -Version Latest
+  $ErrorActionPreference = 'Stop'
+  # 同一条 ('a.md').path 在 StrictMode 3 下报：在此对象上找不到属性“path”。请确认该属性存在。
+  ```
+  ② **跳过计数进汇总，且 100% 跳过即失败**：`if ($total -gt 0 -and $skip -eq $total) { 'SELFTEST FAIL: 判据恒假'; exit 1 }`。"没活干"和"判据恒假"必须能区分。
+  ③ **分类器启动自检**：拿白名单里的值反向喂给自己的提取逻辑（`.md` 提取后仍应是 `.md`），对不上就退出——判据错要**当场响**，不许跑到最后。
+  ④ **回显提取值本身**：过滤分支打印 `ext=[...]`，空值一眼现形；只打印"跳过 N 个"看不出是值错还是数据本来就没有。
+  ⑤ **单测通过 ≠ 脚本内通过**：独立验证时喂的是**字面量**，脚本里喂的是**属性/元素**，两者形状不同；进脚本后要端到端再跑一次并核对计数。
+- **判定**：批处理汇总里出现 `成功 0、失败 0` 或 `跳过 == 总数` ⇒ 先当"判据恒假"处理，不要当"没有数据"。确诊三步：① 打印 `$b.GetType().Name`（是 `String` 还是 `PSCustomObject`？）；② 打印提取值 `[…]"`（空 ⇒ 命中本条）；③ 加 `Set-StrictMode -Version Latest` 重跑，若立刻报"找不到属性 X"⇒ 属性名与被喂对象的字段不一致，改名或按实际 schema 取键。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Windows PowerShell 5.1.26100.9444（LanguageMode=FullLanguage，ConsoleHost）· 2026-09-21
+  （实测：字符串数组上取 `.path` → `$Error` 增量 0、两条全跳过；`file_path` 键 → 同形静默跳过；`Path` 键大小写不同 → 正常读到，证明大小写不是变量；`Set-StrictMode -Version 3` 下同一条报"找不到属性"。）
