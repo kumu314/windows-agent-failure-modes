@@ -1,6 +1,6 @@
 ---
 name: git-ref-plumbing-on-windows
-description: Git for Windows / Git Bash 里 git 引用层与索引层的静默失效，以及 plumbing（write-tree/commit-tree/update-ref/read-tree）提交的安全用法。绕开正常 checkout、手搓提交、批量删分支、回滚之前读。触发词：update-ref 无效、unborn branch、checkout -b 回滚、commit-tree、write-tree、索引残留、文件莫名被删、packed-refs、worktree、force-with-lease、git add -A、filter-branch -d、TMP_DIR。
+description: Git for Windows / Git Bash 里 git 引用层与索引层的静默失效，以及 plumbing 提交的安全用法。绕开正常 checkout、手搓提交、批量删分支、回滚之前读。触发词：update-ref 无效、unborn branch、checkout -b 回滚、commit-tree、write-tree、索引残留、文件莫名被删、packed-refs、worktree、force-with-lease、git add -A、filter-branch -d、TMP_DIR。
 agent_created: true
 ---
 

@@ -15,7 +15,11 @@ import re
 import sys
 from pathlib import Path
 
-MAX_DESC = 300
+# A client only feeds the model a bounded slice of `description`; the widest ceiling
+# measured here was ~276 chars, so a longer one loses its tail trigger words. Kept as
+# a WARN, not an ERROR: the exact window is client-specific, and a lint that blocks a
+# contribution over a number it borrowed from one machine gets ignored everywhere else.
+MAX_DESC = 276
 SECTION_RE = re.compile(r"^## (\d+)\. (.+)$")
 XREF_RE = re.compile(r"([a-z0-9]+(?:-[a-z0-9]+)*)`?\s*§\s*(\d+)")
 STAMP_RE = re.compile(r"\*\*验证于\*\*")
@@ -63,6 +67,50 @@ def scrub(text):
     return re.sub(r"<[^<>\n]{1,28}>", "", text)
 
 
+DESC_RE = re.compile(r"^description:[ \t]+(.*)$")
+
+
+def unq(v):
+    """Strip ONE matching pair of surrounding quotes, so a length check measures what
+    the loader hands the client rather than the raw line."""
+    if len(v) > 1 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    return v
+
+
+def check_description_scalar(path, text):
+    """Frontmatter shapes that make a YAML loader reject the whole file — silently
+    un-loading the skill in every client — which the regex `key: value` parse below
+    cannot see. Deliberately dependency-free so the lint runs on a bare checkout."""
+    out = []
+    parts = text.split("---\n")
+    if len(parts) < 3:
+        return out
+    for line in parts[1].splitlines():
+        m = DESC_RE.match(line)
+        if not m:
+            continue
+        v = m.group(1).strip()
+        if not v:
+            continue
+        q = v[0]
+        if q in "\"'":
+            if len(v) < 2 or not v.endswith(q):
+                out.append(f"{path}: description 以 {q} 开头却没有闭合引号 → YAML PARSE-ERROR")
+                continue
+            inner = re.sub(r"''" if q == "'" else r'\\"', "", v[1:-1])
+            if q in inner:
+                out.append(
+                    f"{path}: {q}-quoted 的 description 内部还有未转义的 {q}"
+                    f" → YAML 在第二个 {q} 处就报错，整颗技能不加载；"
+                    f"含 ASCII 双引号的正文应写成单引号标量（内部的 ' 才需写成 ''）")
+        elif ": " in v or " #" in v or v.startswith("#"):
+            out.append(
+                f"{path}: 未加引号的 description 含 `{': ' if ': ' in v else ' #'}`"
+                f" → YAML 要么报错要么把后半段当注释丢掉；改用单引号标量")
+    return out
+
+
 def parse(text):
     parts = text.split("---\n")
     if len(parts) < 3:
@@ -72,7 +120,7 @@ def parse(text):
     for line in fm.splitlines():
         m = re.match(r"^(\w+):\s*(.*)$", line)
         if m:
-            meta[m.group(1)] = m.group(2).strip().strip('"')
+            meta[m.group(1)] = unq(m.group(2).strip())
     return meta, body
 
 
@@ -134,7 +182,8 @@ def check(pack):
         if not desc:
             errs.append(f"{p}: 缺 description")
         elif len(desc) > MAX_DESC:
-            warns.append(f"{p}: description {len(desc)} 字 > {MAX_DESC}")
+            warns.append(f"{p}: description {len(desc)} 字 > {MAX_DESC}（超出的尾部触发词客户端根本不给模型看）")
+        errs += check_description_scalar(p, ent["text"])
         if meta.get("agent_created") != "true":
             warns.append(f"{p}: 缺 agent_created: true")
         if ent["crlf"]:
@@ -235,6 +284,21 @@ description: x
 这件事要小心，通常是因为环境变了，建议观察一下再说。
 """
 
+# Frontmatter shapes, tested both directions: the flagged half must fire (a loader
+# would reject or truncate them while a regex parse stays silent), the quiet half
+# must NOT (a criterion that cries wolf on valid YAML gets switched off).
+FM_CASES = [
+    (True,  'description: "触发词 a" 与 b"'),
+    (True,  "description: 'don't do this'"),
+    (True,  'description: 详见 根因: 是索引坏了'),
+    (True,  'description: 尾部说明 # 这半段会被当注释丢掉'),
+    (True,  'description: "没闭合的标量'),
+    (False, 'description: \'含 "ASCII 双引号" 的单引号标量\''),
+    (False, 'description: "干净的双引号标量"'),
+    (False, "description: 'it''s escaped'"),
+    (False, 'description: 普通标量，中文冒号：不算'),
+]
+
 
 def _pack(text):
     meta, body = parse(text)
@@ -268,10 +332,21 @@ def selftest():
     print(f"纯散文样本（无标签无命令，必须被拒）：{len(ep)} error")
     for x in ep:
         print("   E:", x)
-    if missed or e2 or not ep:
+    fm_bad = []
+    for should_fire, line in FM_CASES:
+        doc = "---\nname: sample\n%s\n---\n\n## 1. x\n\n- **判定**：`ls`\n- **验证于**：a · 1\n" % line
+        hits = check_description_scalar("sample", doc)
+        if bool(hits) != should_fire:
+            fm_bad.append((line, hits[:1]))
+    print(f"frontmatter 形状样本：{sum(1 for f, _ in FM_CASES if f)} 条必须响 + "
+          f"{sum(1 for f, _ in FM_CASES if not f)} 条不该响，实际错 {len(fm_bad)}")
+    for line, hits in fm_bad:
+        print("   错:", line, "->", hits)
+    if missed or e2 or not ep or fm_bad:
         print("FAIL 过滤器不可信（漏报或误报），先修脚本再信它给的 0")
         return 1
-    print("PASS 自检：脏样本全命中、净样本零 error（占位符 <端口> 不误报，止损线算合法判定锚）")
+    print("PASS 自检：脏样本全命中、净样本零 error、frontmatter 形状两侧都验过"
+          "（占位符 <端口> 不误报，止损线算合法判定锚）")
     return 0
 
 

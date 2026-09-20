@@ -1,6 +1,6 @@
 ---
 name: runtime-resolution-and-abi
-description: '"到底哪个解释器/可执行文件在跑我的代码"——Windows 上多版本运行时并存时的定位与钉死手法。命令存在但退出码奇怪、零输出、装了却找不到、原生模块报 NODE_MODULE_VERSION 不匹配、pip 装了 import 不到、"我本地能跑"之前读。触发词：which python、where node、py -0p、python3 打不开、Command not found、退出码 49、9009、App Execution Alias、WindowsApps、MODULE_NOT_FOUND、better-sqlite3、ABI、PATH 顺序、venv。'
+description: '"到底哪个解释器/可执行文件在跑我的代码"——Windows 上多版本运行时并存时的定位与钉死手法。命令存在但退出码奇怪、零输出、装了却找不到、原生模块报 NODE_MODULE_VERSION 不匹配、pip 装了 import 不到、"我本地能跑"之前读。触发词：which python、where node、py -0p、python3 打不开、退出码 49、9009、App Execution Alias、WindowsApps、MODULE_NOT_FOUND、better-sqlite3、ABI、PATH 顺序、venv。'
 agent_created: true
 ---
 
