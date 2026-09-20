@@ -151,3 +151,53 @@ agent_created: true
 - **判定**：① 回显检查——同一条路径在探针里打印 `[ -L "$p" ]` 的原始形态必须是**你要测的那个字符串**（裸路径不带尾 `/`、不经过 realpath）；若你打印出的已是解析后的路径，本条即命中。② 形态对照——同一次运行里 `p=<裸路径>` 与 `p=<裸路径>/` 必须给出**不同的**结果（junction 样本上实测即为 yes/no 两值）；若两者答案一样，先评估是不是测量管道把它们都解析成了同一个人。③ 产物自检——探针结束后确认报告文件的时间戳/行数与预期段数一致（本轮事故：报告只含前半段，后段因脚本自删而缺失）；报告缺段即测量管道不完整，结论不能采信。
   ④ 显示层复核——"看到乱码"不等于"内容坏了"：控制台按自身代码页渲染 UTF-8 时会把正确的中文显示成乱码（`windows-text-encoding §2`、`runtime-resolution-and-abi` 编码交叉），**先按字节复核再动手**——`python -c "print(open(f,'rb').read(3).hex())"` 或 Node `fs.readFileSync(f)` 打印码点计数；仅凭终端观感就去"修复"，会把好文件改坏（本轮实测：差点据此修一个内容正确的节，字节复核后 mojibake 标记数为 0）。
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Node v24.18.0（探针宿主）/ Git Bash 5.2.37 / Windows PowerShell 5.1.26100.9444 · git 2.53.0.windows.2 · 2026-09-18
+
+## 14. PowerShell 5.1 没有 `if` 表达式：报错指向 `if`，让人以为整条命令坏了
+
+- **现象**（本机实测）：把 `if` 当表达式用在格式化输出里——
+  ```powershell
+  "{0} 可达={1}" -f $n, (if ($x) { 'yes' } else { 'no' })
+  # → if : The term 'if' is not recognized as the name of a cmdlet, function, script file, or operable program.
+  ```
+  报错把 `if` 说成"不认识这个命令"，读起来像**整条命令**坏了，实际只是那个充当 `-f` 操作数的括号组不合法。
+- **根因**：Windows PowerShell 5.1（`PSEdition=Desktop`）**没有** `if` 表达式、没有三元 `? :`。
+  它只有**语句** `if`；写成 `(if (...) {...} else {...})` 时解析器把 `if` 当**命令名**去找。
+  三元 `? :` 是 PowerShell 7 才有的；而 `$(if (...) {...})` 这种**子表达式**在 5.1 与 7 里都合法。
+- **解法**：用子表达式 `$(...)` 包住语句块——
+  ```powershell
+  "{0} 可达={1}" -f $n, $(if ($x) { 'yes' } else { 'no' })
+  ```
+  或先算进变量再格式化（最稳，且中间值可回显）。
+- **先分辨你在哪个 PowerShell**：`$PSVersionTable.PSVersion` + `PSEdition`。
+  实测本机工具链里那个叫 `pwsh` 的**实际是 5.1 Desktop** —— 名字不可信，`PSEdition` 可信
+  （与 `runtime-resolution-and-abi` 同主题：先钉身份，再谈行为）。
+- **真正的危险不是报错，是"部分执行"**：长脚本里这类**显示层**语法错误可能在前面几句**已经跑完**之后才抛。
+  于是现场是"半执行状态"，却极易读成"整段没跑"。
+  对策：多步命令**每步各回显读数**（别拿下一步的绿推断上一步跑了）；写脚本时把"算值"与"打印"分开，
+  不要往格式化参数里塞逻辑。
+- **判定**：报 `The term 'X' is not recognized`，而 `X` 是语言关键字（`if`/`else`/`for`）而非你的程序名时，
+  先怀疑**宿主 PowerShell 版本的语言特性差异**，不要去 PATH 里找可执行文件。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Windows PowerShell 5.1.26100.9444（PSEdition=Desktop）· 2026-09-19
+  （实测：`(if (...) {...})` 用作 `-f` 操作数报 `The term 'if' is not recognized`；改 `$(if (...) {...})` 后通过。）
+
+## 15. 长正文别当命令行参数传：写文件 + `-F` / `--file`
+
+- **症状**（本包踩了**两次**）：`git commit -m $msg` 而 message 里含 ASCII 双引号
+  （例如 `造一个"把 --panel-bg-l1 定义为深色"的页面`）→
+  ```
+  git : error: unknown option `panel-bg-l1'
+  usage: git commit ...
+  ```
+  message 里的一段被当成**选项**了。
+- **根因**：PowerShell 把参数交给原生命令时，内嵌双引号被当作**参数边界**，参数被拆成多段；
+  git 看到以 `-` 开头的那段就当选项。凡正文里可能出现引号、反引号、`$`、分号、中文标点，
+  **转义拼装就不可能可靠**。
+- **对策**：**长正文一律走文件**，不要塞进参数。
+  - `git commit -F <file>`（本包已固化用法）
+  - 其他 CLI 找 `--file` / `--input` / `--file=-`，或走 stdin（`Get-Content x | prog`）
+  - 临时 message 文件放**仓库外** —— 放仓库内会被 `git add -A` 一起提交（本包踩过一次）
+- **⚠️ 教训的方向要选对**：第一次我用「」替换掉双引号绕过去了，那**只治了症状**，
+  换个文本又中招。**「别用双引号」是错的教训；「别把长正文当参数传」才是对的。**
+- **判定**：报错里出现 `unknown option 'X'` 且 `X` 是你正文里的某个片段 → 本条命中。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Windows PowerShell 5.1.26100.9444 · git 2.53.0.windows.2 · 2026-09-19
+  （实测：含双引号的 message 报 `unknown option`；改 `git commit -F 文件` 一次成功。报错里的变量名已中性化。）
