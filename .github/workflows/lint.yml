@@ -18,7 +18,9 @@ jobs:
           python-version: "3.12"
       - name: Prove the gate reacts
         run: python scripts/check.py selftest
-      # Not --strict: 42 sections legitimately lack an environment stamp, and
-      # back-filling them in bulk would fabricate measurements.
+      # Not --strict: a chunk of the legacy sections legitimately lack an environment
+      # stamp, and back-filling them in bulk would fabricate measurements. The live
+      # count is `python scripts/check.py stats`（缺戳 = 节 − 有戳 − 豁免）, not a
+      # number hard-coded in this file, because a stale one reads like a promise.
       - name: Check the pack
         run: python scripts/check.py check

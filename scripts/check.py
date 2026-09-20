@@ -23,6 +23,11 @@ MAX_DESC = 276
 SECTION_RE = re.compile(r"^## (\d+)\. (.+)$")
 XREF_RE = re.compile(r"([a-z0-9]+(?:-[a-z0-9]+)*)`?\s*§\s*(\d+)")
 STAMP_RE = re.compile(r"\*\*验证于\*\*")
+# A section may declare itself review-only in place of an environment stamp, but the
+# declaration must carry a reason: "why this cannot be re-measured here" IS the evidence.
+# A bare marker would let anyone opt out for free, hence the length floor. The floor is
+# a character count rather than a keyword list because the reason is free prose.
+REVIEW_RE = re.compile(r"\*\*状态\*\*\s*[：:]\s*复盘条目\s*[（(。:：]?[ \t]*([^）)\n]{8,})")
 
 # Machine-specific identity tokens (your username, your workspace folder name)
 # must NOT be hard-coded here, or the lint itself publishes them. Put one per
@@ -214,7 +219,8 @@ def check(pack):
             elif not (ANCHORS.search(seg) or code):
                 warns.append(f"{p} §{s['num']}: 判定只藏在内联命令里（{inline} 条），无独立判定行")
             if not STAMP_RE.search(seg):
-                warns.append(f"{p} §{s['num']}: 缺环境戳 **验证于**")
+                if not REVIEW_RE.search(seg):
+                    warns.append(f"{p} §{s['num']}: 缺环境戳 **验证于**")
             for m in XREF_RE.finditer(seg):
                 tgt, tnum = m.group(1), int(m.group(2))
                 if tgt == name:
@@ -297,6 +303,26 @@ description: x
 这件事要小心，通常是因为环境变了，建议观察一下再说。
 """
 
+# The review-only exemption, tested both directions: a declaration that says *why* it
+# cannot be re-measured replaces the environment stamp, and one that doesn't must still
+# be reported (otherwise the marker becomes a free way to switch the check off).
+REVIEW_OK = """---
+name: sample
+description: x
+---
+
+## 1. 一节只有复盘声明、没有环境戳
+
+- **现象**：接口返回 200，写操作却被拒
+- **根因**：错误码放在 body 的业务字段里
+- **对策**：断言 body 字段而不是状态码
+- **判定**：跑一次故意未登录的对照请求
+- **状态**：复盘条目（判定要一个带登录态的真实后台，本机没有对应环境，今天无法重跑）
+"""
+
+REVIEW_BAD = REVIEW_OK.replace("复盘条目（判定要一个带登录态的真实后台，本机没有对应环境，今天无法重跑）",
+                               "复盘条目（略）")
+
 # Frontmatter shapes, tested both directions: the flagged half must fire (a loader
 # would reject or truncate them while a regex parse stays silent), the quiet half
 # must NOT (a criterion that cries wolf on valid YAML gets switched off).
@@ -345,6 +371,15 @@ def selftest():
     print(f"纯散文样本（无标签无命令，必须被拒）：{len(ep)} error")
     for x in ep:
         print("   E:", x)
+    eo, wo = check(_pack(REVIEW_OK))
+    eb, wb = check(_pack(REVIEW_BAD))
+    rev_ok = "缺环境戳" not in " ".join(wo) and not eo
+    rev_bad = "缺环境戳" in " ".join(wb)
+    print(f"复盘豁免样本（两侧）：带理由的声明不报缺戳且零 error={rev_ok}；"
+          f"空理由仍报缺戳={rev_bad}")
+    if not rev_ok:
+        for x in eo + wo:
+            print("   意外:", x)
     fm_bad = []
     for should_fire, line in FM_CASES:
         doc = "---\nname: sample\n%s\n---\n\n## 1. x\n\n- **判定**：`ls`\n- **验证于**：a · 1\n" % line
@@ -355,28 +390,32 @@ def selftest():
           f"{sum(1 for f, _ in FM_CASES if not f)} 条不该响，实际错 {len(fm_bad)}")
     for line, hits in fm_bad:
         print("   错:", line, "->", hits)
-    if missed or e2 or not ep or fm_bad:
+    if missed or e2 or not ep or fm_bad or not rev_ok or not rev_bad:
         print("FAIL 过滤器不可信（漏报或误报），先修脚本再信它给的 0")
         return 1
-    print("PASS 自检：脏样本全命中、净样本零 error、frontmatter 形状两侧都验过"
-          "（占位符 <端口> 不误报，止损线算合法判定锚）")
+    print("PASS 自检：脏样本全命中、净样本零 error、frontmatter 形状与复盘豁免都两侧验过"
+          "（占位符 <端口> 不误报，止损线算合法判定锚，带理由的复盘声明顶替环境戳）")
     return 0
 
 
 def stats(pack):
-    tot_s = tot_l = tot_stamp = 0
-    print(f"{'skill':36} {'节':>3} {'行':>5} {'desc':>5} {'有戳':>5}")
+    tot_s = tot_l = tot_stamp = tot_rev = 0
+    print(f"{'skill':36} {'节':>3} {'行':>5} {'desc':>5} {'有戳':>5} {'豁免':>5}")
     for name, ent in sorted(pack.items()):
         if ent.get("missing"):
             print(f"{name:36} MISSING")
             continue
         lines = len(ent["text"].splitlines())
-        stamped = sum(1 for s in ent["secs"] if STAMP_RE.search("\n".join(s["lines"])))
+        segs = ["\n".join(s["lines"]) for s in ent["secs"]]
+        stamped = sum(1 for seg in segs if STAMP_RE.search(seg))
+        exempt = sum(1 for seg in segs if not STAMP_RE.search(seg) and REVIEW_RE.search(seg))
         tot_s += len(ent["secs"])
         tot_l += lines
         tot_stamp += stamped
-        print(f"{name:36} {len(ent['secs']):>3} {lines:>5} {len(ent['meta'].get('description', '')):>5} {stamped:>5}")
-    print(f"{'TOTAL':36} {tot_s:>3} {tot_l:>5} {'':>5} {tot_stamp:>5}")
+        tot_rev += exempt
+        print(f"{name:36} {len(ent['secs']):>3} {lines:>5} {len(ent['meta'].get('description', '')):>5} {stamped:>5} {exempt:>5}")
+    print(f"{'TOTAL':36} {tot_s:>3} {tot_l:>5} {'':>5} {tot_stamp:>5} {tot_rev:>5}"
+          f"   （缺戳 = 节 − 有戳 − 豁免 = {tot_s - tot_stamp - tot_rev}）")
     return 0
 
 
