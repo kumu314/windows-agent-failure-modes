@@ -1,6 +1,6 @@
 ---
 name: shell-quoting-and-path-forms
-description: Windows 上把文本和路径安全送进 shell 的失效模式。用 heredoc 写脚本、用 python -c 传长文本、往文件追加含反引号或中文标点的正文、Git Bash 里路径写法报错、taskkill/sc/reg 等原生命令传参、含空格目录名传给第三方 CLI 之前先读这条。触发词：heredoc、反斜杠被吞、反引号消失、命令替换、全角符号、cd /d、taskkill 无效、路径被拆开、8.3 短路径、/tmp 找不到、Glob 返回空、md5 对不上、MAX_PATH、长路径看不见、属性不存在、全判否。
+description: Windows 上把文本和路径安全送进 shell 的失效模式。用 heredoc 写脚本、用 python -c 传长文本、往文件追加含反引号或中文标点的正文、Git Bash 里路径写法报错、taskkill/sc/reg 等原生命令传参、含空格目录名传给第三方 CLI 之前先读这条。触发词：heredoc、反斜杠被吞、反引号消失、命令替换、全角符号、cd /d、taskkill 无效、路径被拆开、8.3 短路径、/tmp 找不到、Glob 返回空、md5 对不上、MAX_PATH、长路径看不见、属性不存在、全判否、0 命中是假的。
 agent_created: true
 ---
 
@@ -15,12 +15,29 @@ agent_created: true
 - **对策**：① 传长文本优先用编辑器的 Read+Edit / Write，压根不进 shell；② 必须 heredoc 时定界符加引号：`cat <<'EOF'`；③ 必须跑脚本就写成文件再 `python file.py`，别用 `-c` 拼几十行。
 - **判定**：`grep -c '`' 目标文件`（或搜那段正文特有的关键词）。只看"追加了多少字符"必漏——字符数对、内容被替换过的情形最常见。
 
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（zh-CN）· Git Bash 5.2.37(1)-release(x86_64-pc-msys) · Python 3.12.10 · 2026-09-21
+  （temp 内活测：同一行正文先喂 `cat <<EOF`（定界符无引号）再喂 `cat <<'EOF'`。无引号版落盘 86 B、反引号数 **0**、
+  `whoami` 的位置变成账号名、`$(id -u)` 的位置变成 uid；有引号版 90 B、反引号数 2。
+  附带一条判据修正：这次 stderr **是空的**（被执行的 `whoami`、`id -u` 都成功了），
+  所以"去 stderr 找 `command not found`"只是充分不必要——真正可靠的是数目标字符（反引号数 2 → 0）。）
+- **复测出入（2026-09-21，同一批）**：`“”` 这一支**未复现**——`“引用”` 在无引号定界符的 heredoc 里原样落盘，两个码点都在。
+  能确定被吃掉的是 `` ` ``、`$()`、`${}`；"中文引号也会被吃"按未验证处理，若在特定 shell/版本上成立请补版本号。
+
 ## 2. heredoc 再吞一层反斜杠
 
 - **现象**：heredoc 里写 `\\theta` 想匹配 LaTeX 命令，落盘成 `\t heta`，正则全量匹配 0 条，而脚本一声不响。
 - **根因**：heredoc 自身消化一层转义，正则需要的层数被减掉了。
 - **对策**：能用 Write/Edit 就别用 heredoc；必须用时用 `chr(92)` 或原始字符串 `r"\\theta"` 构造，避免"数反斜杠"。
 - **判定**：写完先跑一条 `python -c "print(repr(open(f,encoding='utf-8').read()[i:j]))"` 看落盘字面，再跑全量。
+
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · Python 3.12.10 · 2026-09-21
+  （活测：源文本同为 `pat = \\theta`，`cat <<EOF` 落盘 `repr()` = `'pat = \\theta'`（反斜杠数 **1**），
+  `cat <<'EOF'` 落盘 `'pat = \\\\theta'`（数 **2**）⇒ 无引号定界符恰好吃掉一层。）
+- **判据收紧（2026-09-21）**：**定界符加引号不等于保险**。本轮用 `python - <<'PY'` 传一段含 `'\\\\?\\'`（扩展长度前缀）的脚本，
+  引号加了仍少一层，落盘成 `'\\?\'` → `SyntaxError: unterminated string literal`，报错指向的行还不是我以为是的那一行。
+  传参链上还有别的层在吃反斜杠（工具层 / 命令行层），本机无法把它们拆开。
+  ⇒ 对策 ① 的适用面比原文更宽：**正文里只要含反斜杠，就不要过 shell，直接 Write 成文件**；
+  非要传就用 `chr(92)` 拼（本轮最后就是靠 `chr(92)` 一次过的）。
 
 ## 3. 全角符号破坏机器可读的数据契约
 
@@ -29,12 +46,31 @@ agent_created: true
 - **对策**：凡是被正则/解析器消费的字段只用 ASCII `- + . e ,`；排版层的全角替换放在最后一步、且在解析之后。
 - **判定**：入库前 `grep -nP '[−×≤≥→""'']' 契约文件`，命中即打回。
 
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · GNU grep 3.0 · Python 3.12.10 · 2026-09-21
+  （活测：temp TSV 两行，值分别是全角 `−2.5`（首字符 U+2212）与 ASCII `-2.5`（U+002D）。
+  `re.findall(r'-?\d+\.?\d*', v)` 取到 `['2.5']` 与 `['-2.5']` ⇒ 全角那行**符号翻正**，且长度、小数位都对，肉眼看不出。
+  判定命令两条都有效（不必退回逐字符 `-F`）：`grep -nP '[−×≤≥→“”‘’]'` 与 `grep -nE '[−×≤≥]'` 在同一 zh-CN 环境下都命中第 1 行、rc=0。）
+
 ## 4. MSYS 路径只有 bash 认，原生 exe 不认
 
 - **现象**：`git apply --check /d/work/x.patch` → `error: can't open patch: No such file or directory`；`git commit-tree -F $(mktemp)` → `fatal: could not open '/tmp/tmp.XXXX'`。而 `ls /d/work/x.patch`、`cat /tmp/tmp.XXXX` 在 bash 里都好好存在。
 - **根因**：`/d/`、`/tmp` 是 MSYS 挂载点，Git for Windows 是原生程序不参与映射；bash 内建与 coreutils 参与。同族：Git Bash 里 `curl -o /dev/null` 返回**退出码 23**（CURLE_WRITE_ERROR），把 `&&` 链断在身后。
 - **对策**：交给原生程序的参数一律 Windows 形态（`D:/work/x.patch`）或仓库内相对路径（先 `cp /d/.../x.patch .git/x.patch` 再 `git apply --check .git/x.patch`）；只要 HTTP 码就 `curl -s -o <真实文件> -w "%{http_code}"`，别用 `/dev/null`。
 - **判定**：`bash 侧看得见 + 原生程序报 No such file` = 就是这条，不要去查权限。
+
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37(1)-release(x86_64-pc-msys) · git 2.53.0.windows.2 · curl 8.18.0 · Node v24.18.0 · Python 3.12.10 · 2026-09-21
+- **复测出入（2026-09-21，原文三条读数全部未复现；temp 新建仓库跑，无副作用）**：
+  ① `git apply --check <MSYS 形态绝对路径>` **rc=0**——同一份补丁的 Windows 形态、仓库内相对、`./` 三种写法也全 rc=0；
+  ② `git commit-tree -F /tmp/<消息文件>` **正常产出提交对象**，那句 `fatal: could not open '/tmp/tmp.XXXX'` 没有出现；
+  ③ `curl -o /dev/null` 在 https 直连、加 `-sS`、加 `-w '%{http_code}'`、改 `-o NUL`、以及放进 `&&` 链五种给法下**一律 rc=0**，
+  退出码 23 未出现，`&&` 后半段照常执行（对照组：不存在的 host rc=6、`--fail` 打 404 rc=22，说明命令本身跑得动）。
+- **真正的边界在"哪一层参与转换"**：`cygpath -w /d` = `<盘>:\`、`cygpath -w /tmp` = 挂载表里那条真实目录，
+  转换发生在 **bash 交给子进程的 argv 上**，所以原生 exe 收到的是已经换算过的 Windows 形态（实测 node、python 拿 argv 里的 `/d/...` 都能读到文件）。
+  于是原文那句要按两支改写：**(a) 只改 argv，不改脚本正文**——同一条路径写进 `-c "…"` 里就没有转换，Python 把 `/tmp/x` 按字面解析成 `<盘>:\tmp\x`（这一支就是 §5）；
+  **(b) 复合路径只换前半**——实测把 `/tmp/../d/work/x.patch` 交给 `git apply --check`，git 收到的是 `<盘>:/<TMP挂载点>/../d/work/x.patch` 这种半中半西的形态，rc=**128** `error: can't open patch`。
+- **判据改写后仍成立的那一句**：路径写法出事时，**同一份内容换两三种写法各跑一次**（MSYS 形态 / Windows 形态 / 仓库内相对），
+  用退出码差异定位是哪一层在改写法；不要去查权限，也不要把"某条路径失败"直接写成"原生程序不认 MSYS 路径"。
+  本轮适用版本记为 Git Bash 5.2.37 + git 2.53 + curl 8.18；更早版本若真报 `can't open patch`，属另一档行为，补版本号后再并存。
 
 ## 5. Git Bash 的 `/tmp` 与 Windows 版 Python 不是一个世界
 
@@ -43,11 +79,25 @@ agent_created: true
 - **对策**：跨 bash↔Python 传递的中间文件一律写 **Windows 绝对路径**，且放在仓库外（`D:/tmp/…` 之类），避免被 `git add` 顺手收进来。
 - **判定**：`python -c "import tempfile;print(tempfile.gettempdir())"` 与 `echo $TMPDIR / /tmp` 两边对一下即穿帮。
 
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · Python 3.12.10 · 2026-09-21
+  （活测：bash 里 `printf X > /tmp/probe.txt` 成功且 `ls` 得到；同一时刻 Python
+  `os.path.exists('/tmp/probe.txt')` = **False**、`open()` 抛 `FileNotFoundError`；
+  `os.path.abspath('/tmp')` = `<盘>:\tmp`，而挂载表那行写的是 `/tmp` → `$TMP` 指的那块真实目录（本机不是 `<盘>:\tmp`）。
+  反向也对：Python 往 `tempfile.gettempdir()` 写的文件，bash 用同一个 Windows 绝对路径 `ls` 得到。
+  判定命令有效：`gettempdir()` 与 `/tmp` 两个读数不同即穿帮，本轮 = `D` 盘某真实目录 vs `<盘>:\tmp`，一眼分家。）
+
 ## 6. `cd /d/xxx` 与含空格路径
 
 - **现象**：`cd /d D:\work` 在 Git Bash 里报 `cd: too many arguments`（`/d` 是 cmd.exe 的开关，不是 bash 的）；`cd "D:\新建 文件夹"` 或带中文的路径被拆成多段。
 - **对策**：bash 用 `cd "D:/work"`（正斜杠 + 盘符 + 引号）；需要 cmd 语义就显式 `cmd /c`。任何含空格/中文的路径**永远加引号**。
 - **判定**：同一命令换 `cd "D:/x"` 形式即成功，可确诊是形态问题而非目录不存在。
+
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · 2026-09-21
+  （temp 内活测四条：`cd /d <路径>` → `bash: line 1: cd: too many arguments`、rc=1；
+  `cd "<盘>:/work"` → 成功（`pwd` 回显成 `/d/work` 形态，这本身是 §4 那支 argv 转换的另一面）；
+  `cd <含空格目录>`（不加引号）→ 报的也是 `too many arguments`，**不是** `No such file or directory`——
+  这条区分值钱：见到 `too many arguments` 就说明是切词/开关问题，目录根本没被当成一个参数送去；
+  `cd "<含空格 + 中文的目录>"` → 成功。）
 
 ## 7. `//F` 与 `/Flag`：MSYS 会重写原生命令的开关
 
@@ -72,6 +122,18 @@ agent_created: true
 - **对策**：任何"0 命中"下结论前，换一条通道复核一次（`ls`、`Test-Path`、`find`）。同理：查询脚本 0 命中时，先证明**过滤器本身有效**（喂一个已知存在的串当对照组），再相信那个 0。
 - **判定**：`ls "<同一目录>"` 有输出而 Glob 没有 → 是工具形态问题。
 
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · Python 3.12.10 · Node v24.18.0 · 2026-09-21
+- **复测出入（2026-09-21：假空复现了，但扳机不是"中文"，是长度；方向也和原文相反）**，三面都在 temp 造、跑完留在 temp：
+  ① **短**路径（总长 53）里同时放中文、空格、以及**目录名带 `[ ]`** 的目录：通配工具、`python os.listdir`、`bash ls` **三通道全部正常列出**。
+  ⇒ "中文/空格/方括号会让通配层假空"这一支未复现。
+  ② 同样的名字嵌到 **总长 263（目录）/270（文件）的纯 ASCII** 路径：`os.path.exists()` = **False**、`os.listdir` = `FileNotFoundError(3)`，
+  而 `node` 的 `readdirSync` 与 `bash ls` **照常列出那个文件** ⇒ 假空确实存在，但 ASCII 与中文同形，所以成因是 §11 那条 MAX_PATH 阈值，不是编码。
+  ③ 同一条 >260 的路径交给通配工具，返回的不是 `No files found` 而是一句 `spawn <安装目录>\…\rg.exe ENOENT`——
+  那个 exe 用 `ls` 明明在（5 444 592 字节）。**报错文案指着"二进制不存在"，真因是子进程的工作目录在 Win32 查找层不存在**，与 ② 同源。
+- **对策加一句（本轮实测得出）**：换通道要换**不同家族**——MSYS coreutils、libuv(Node)、Win32-native(Python/PowerShell) 各算一族；
+  同族两条一起瞎会伪装成"两边都同意这里没东西"。另外 8.3 短名在这一档**救不回来**：
+  实测中文段的短名仍是非 ASCII、总长仍 >260，Python 依旧 `FileNotFoundError(3)`；越界就读不到时，唯一稳的做法是缩短结构本身（§11 对策 ③）。
+
 ## 10. 用 `$(…)` 捕获内容再算哈希：必然"不一致"
 
 - **现象**（本机实测）：核对"本地装的技能文件 == 远端 raw 的内容"，写成
@@ -85,6 +147,13 @@ agent_created: true
   ```
   非要用变量比，就把换行补回去再哈希：`printf '%s\n' "$V" | md5sum`（但仍不如 `diff` 直观，`diff` 还能指出差在哪一行）。
 - **判定**：① 哈希等于 `d41d8cd98f00b204e9800998ecf8427e` ⇒ 是**空输入**，问题在抓取不在内容（按 `silent-failure-triage §2` 先证明取值通道有效）；② 两侧字节数只差 1 且文件尾是换行 ⇒ 命中本条；③ `wc -c` 两侧相同 + `diff` 为空，才算真一致。
+
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · coreutils(md5sum/wc) · 2026-09-21
+  （活测：同一份 6 字节文件 `alpha\n`。`md5sum < f` = `9f9f90db…`；
+  `V=$(cat f)` 之后 `printf '%s' "$V" | md5sum` = `2c1743a3…` ⇒ **DIFF**；
+  改 `printf '%s\n' "$V"` = `9f9f90db…` ⇒ **SAME**；空输入基准 = `d41d8cd98f00b204e9800998ecf8427e`（与原文一致，一眼可认）。
+  字节侧对上：`wc -c <<<"$V"` 回 6（herestring 自己补了一个换行，别拿它当证据），`printf '%s' "$V" | wc -c` 回 **5**，文件本身 6 ⇒ 差的正是结尾那一个换行。
+  `diff f g` 空 = 唯一该信的读法，本轮同时验证了它对同内容文件的判定。）
 
 ## 11. 路径总长到 260 字符：一些工具照常成功，另一些连"文件存在"都看不见
 
@@ -255,3 +324,19 @@ agent_created: true
 - **判定**：批处理汇总里出现 `成功 0、失败 0` 或 `跳过 == 总数` ⇒ 先当"判据恒假"处理，不要当"没有数据"。确诊三步：① 打印 `$b.GetType().Name`（是 `String` 还是 `PSCustomObject`？）；② 打印提取值 `[…]"`（空 ⇒ 命中本条）；③ 加 `Set-StrictMode -Version Latest` 重跑，若立刻报"找不到属性 X"⇒ 属性名与被喂对象的字段不一致，改名或按实际 schema 取键。
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Windows PowerShell 5.1.26100.9444（LanguageMode=FullLanguage，ConsoleHost）· 2026-09-21
   （实测：字符串数组上取 `.path` → `$Error` 增量 0、两条全跳过；`file_path` 键 → 同形静默跳过；`Path` 键大小写不同 → 正常读到，证明大小写不是变量；`Set-StrictMode -Version 3` 下同一条报"找不到属性"。）
+
+## 18. 正则方言与引擎不匹配时"扫干净了"是假的：ERE 静默 0 命中、`\U` 吃引号层、`-P` 不吃 `-f`
+
+- **现象**（同一份含目标串的数据，三种写法各自给出 0 命中）：
+  ① `grep -RIl -E '(?!9222)Users' <面>` → **rc=1、stderr 空、0 行**（POSIX ERE 没有 lookahead）。它与"内容真干净"**完全同形**：同一面喂 `grep -RIl -E 'ZZZNOMATCHZZZ'` 得到**逐字段一样**的 rc=1 / stderr 空 / 0 行；把 lookahead 去掉用 `-E 'Users'` 立刻命中 1 个文件。
+  ② `grep -RIl -P` 的模式里反斜杠层数错一位就报 `grep: PCRE does not support \L, \l, \N{name}, \U, or \u`，然后**不产出任何行**（rc=2）。触发点**取决于引号层**，不是"写几个反斜杠看着像"：单引号里 `'C:\Users'`（1 个）就报、`'C:\\Users'` 正常命中；双引号里 `"C:\Users"` 与 `"C:\\Users"` **都报**，要写到 4 个才把 1 个送进引擎。
+  ③ `grep -RIl -P -f patterns.txt` → `grep: the -P option only supports a single pattern`、rc=2、0 行；而**同一个模式文件**喂 `-E -f` 命中 2 个文件、喂 `-F -f` 命中 1 个。⇒ "为了 lookahead 把引擎换成 PCRE"这一步，会把整组批量规则一起降级成 0 命中。
+- **根因**：**"0 命中"至少四种成因**——内容真干净 / 正则本身写错 / 方言与引擎不匹配 / **数据里根本没有那个形状**。其中只有 ②③ 会在 stderr 与 rc=2 留痕，① 连痕迹都没有；而脚本化扫描最常见的三写法（`2>/dev/null`、`subprocess` 默认不收 stderr、只看 stdout 空不空）恰好把唯一的痕丢掉。
+- **对策**：① 需要 lookahead 就显式 `-P`——实测 `grep -RIl -P '(?!9222)Users'` 同一面命中 1；② `-P` 不吃 `-f`，批量模式改成 while-read 循环、**每条单独 `-e`** 各跑一次；③ 反斜杠不赌层数，**改用字符类** `[/\\]`、`[.]` 替掉字面量转义（实测 `'C:[/\\]Users'` 命中 1）；④ 固定字符串一律 `-F`，禁止任何元字符解释；⑤ **stderr 与 rc 一起进日志**，扫描器的"成功"要求净面 0 命中 **且** 探针命中 **且** rc/stderr 都在预期内。
+- **本轮我自己踩到的两个"看着像方言错、其实是别的"**（比通则更难防，记下来免得重犯）：
+  - 第一版反斜杠夹具的数据里**没有空格**，于是 `-E '\s'`、`-P '[[:space:]]'` 全给出 rc=1/0 行，我差点写成"GNU grep 不认 POSIX 字符类"。换一份**含空格**的数据重打，`-E`/`-P` 两种引擎下 `[[:space:]]`、`\s`、`\balpha` **六个组合全部命中**——是数据里没有，不是引擎不认。
+  - 我拿 `(?!C:)Users` 当"必然 0 命中"的反向对照，结果它命中 1：lookahead 是**向前**看的，在 `Users` 那个位置它检查的是**后面**是不是 `C:`，与前面无关。断言方向记反，对照就白做。
+- **同族（不同工具、同一个"0 命中不是证据"）**：Python `glob.glob('skills/*/SKILL.md')` 在 Windows 返回**反斜杠**路径（实测 `['skills\\dummy-skill\\SKILL.md']`），`p.split('/')[1]` 直接 `IndexError`；要父级目录名用 `Path(p).parts[-2]`（实测得 `dummy-skill`）。
+- **判定**：一次扫描只在**同时**满足三条时才算"干净"——净面 0 命中、**同一被扫面内**注入的对照命中 > 0（**逐条模式各证一次**，不能一条证全局）、rc 与 stderr 都在预期内。"逐条各证一次"不可省：`-P -f` 那一类失效正是整组一起变 0 的那种。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（zh-CN）· Git for Windows 自带的 GNU grep 3.0 · Git Bash 5.2.37(1)-release(x86_64-pc-msys) · Python 3.12.10 · 2026-09-21
+  （①②③ 三条、两条自踩纠正与 glob 反斜杠都是本轮同一 temp 目录内跑完的读数，夹具为 3 行，其中一行的形状是"盘符 + 单反斜杠 + Users + 单反斜杠 + 一个占位账号名 + \x.txt"（占位名，非真实账号）；引号层矩阵为单引号 1/2、双引号 1/2/4 共五格实测。**未测到的部分**：结论只在这台机器的 GNU grep 3.0 上取，未覆盖 busybox/ripgrep/Windows 自带 `findstr` 的方言边界。）

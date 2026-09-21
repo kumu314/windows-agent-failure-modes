@@ -143,6 +143,23 @@ gh api --method PUT repos/<owner>/<repo>/contents/<path> \
 - **复测的元教训（2026-09-18）**：第一次对账拿**本地 HEAD（领先远端 2 个未推提交）**去比**远端 HEAD**，得到 28 行"差异"——方向对、基准错，那是**真实分歧**不是格式坑。**对账第一步是把两侧钉到同一个 commit**：先 `gh api .../branches/main --jq .commit.sha` 取远端基准、确认本地 `git cat-file -t <sha>` 存在再开比；分叉状态下任何"不一致"结论都无效。
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · git 2.53.0.windows.2 · gh 2.97.0 · 2026-09-18
 
+## 9. 远端状态读数要能自证：徽章的 `?sha=` 是装饰参数，API 会在你脚下换脸
+
+- **现象**（同一小时内三个读数全不可信）：核验"这次推上去的提交 CI 过没过"，最容易拿到的三个数各有自己的假法：
+  ① 状态徽章加 `?sha=` **不参与筛选**——对同一 workflow 分别喂真提交号、全 0、全 f、乱串，四次返回的 SVG **字节完全一致**（1282 字节 / md5 前 8 位同为 `abc15660`），于是那枚"绿"完全可能属于另一条提交；
+  ② `api.github.com` **同一 URL 秒级内从 200 变 403**：第一次取到 `total_count` 与 `head_sha`，紧接着第二次就是 `403 rate limit exceeded`、`X-RateLimit-Limit: 60`、`Remaining: 0`，响应体里写的是**共享出口 IP**——脚本把 403 读成"没有这个 run"，结论就整个反了；
+  ③ 不加代理时 `origin/main` 只是本地跟踪引用，`git log origin/main` 看着是最新的，而它已经几十次抓取都没碰过网络。
+- **根因**：三者都是**读数所在层与结论不在同一层**。徽章是面向"分支整体状态"的展示端点，`?sha=` 只是装饰参数，服务端根本不按它筛；REST 端点在限流时返回的是**配额/传输层错误**，语义上与"资源不存在"毫无关系；本地远端引用只在真发生过网络交互时才更新。
+- **对策（按可信度取最底层那条，并要求它自带与被核验提交绑定的字段）**：
+  ① 网络层真相：`git -c http.proxy=http://127.0.0.1:<端口> ls-remote origin refs/heads/main`——输出那枚 40 位 sha 就是网络事实，别读本地跟踪引用；
+  ② 内容层：`raw.githubusercontent.com/<owner>/<repo>/main/<path>` 或 `codeload.github.com/…/tar.gz/refs/heads/main` 取字节，与本地 blob **比哈希不比长度**；
+  ③ CI 层：配额还在时用 REST（`…/actions/workflows/<file>/runs`，`head_sha` + `status` + `conclusion` + `event` 直接把绑定给你），**一旦 403 就退到 HTML**——抓 `…/actions/workflows/<file>.html`，按 `/actions/runs/<id>` 切段，在**同一段内**取 40 位 sha 与 `completed successfully`，再打开 run 详情页核对它的标题就是 `<提交标题> · <repo>@<短 sha>`；
+  ④ `403` 与 `404` 分开处理：读响应体 `message` 和 `X-RateLimit-Remaining`，别用状态码猜资源存不存在。
+- **附带一条口径（决定"CI 绿"能证明什么）**：**一次 push 只产生一个 run，且绑在 tip 上**。本次连推 3 个提交，workflow 页里中间两个提交各出现 **0 次**、只有 tip 有 run ⇒ "CI 过了"**不等于**"这批提交每个都被单独验过"，中间提交只能靠推送前逐棵树扫描兜底（见 §8 的逐对象核对）。
+- **判定**：任何"远端已经是新的 / CI 已经过了"的结论，必须能指出**一条与被核验提交绑定的读数字段**——`ls-remote` 的 sha、raw 响应的哈希、run 页或 REST 里的 `head_sha`，三者全无 = 只是断言。两条反向自检**都要做**：把提交号换成一个瞎写的值再取一次徽章，**返回没变就说明这条证据本来就不成立**；把同一 API URL 连打两次，第二次 403 就说明这条通路不可依赖，改走 ②③。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（zh-CN）· git 2.53.0.windows.2 · Git Bash 5.2.37(1)-release(x86_64-pc-msys) · 本机 `<端口>` 出口代理（curl 与 git 共用）· 2026-09-21
+  （实测：徽章四次喂值 1282 字节、md5 前 8 位全等；REST 首打 200，取到 `head_sha=9e77fb3eaa…`、`status=completed`、`conclusion=success`、`event=push`、`total_count=8`，同一分钟再打即 `403 rate limit exceeded`、`Remaining: 0`（未认证限额 60，出口 IP 与他人共享）；HTML 兜底通路取到 run `35562276962` 同段内完整 40 位 sha + `completed successfully`，run 页标题含提交标题与 `@9e77fb3`；`ls-remote` 回 `9e77fb3eaa…`；公网 raw 逐文件 md5 与 HEAD blob 6/6 相同。**未测到的部分**：配额 reset 只读过一次响应头，没做长轮询确认恢复时长；"中间提交无 run"是在一次 3 提交的 push 上观察的，n=1。）
+
 ## 复用信号
 
-- "浏览器/gh 能用只有 git 不行" → §1；"端口能连但请求挂" → §2；"这个客户端说不通行另一个说不通" → §3；"OOM 的字节数像配置的默认值" → §4；"push 不报错也不成功" → §5 → §6；"每次都是 401/422" → §7；"核对时两个 SHA 对不上 / 条数差一截" → §8。
+- "浏览器/gh 能用只有 git 不行" → §1；"端口能连但请求挂" → §2；"这个客户端说不通行另一个说不通" → §3；"OOM 的字节数像配置的默认值" → §4；"push 不报错也不成功" → §5 → §6；"每次都是 401/422" → §7；"核对时两个 SHA 对不上 / 条数差一截" → §8；"CI 绿但说不出跑在哪条提交 / 徽章和 API 读数打架" → §9。
