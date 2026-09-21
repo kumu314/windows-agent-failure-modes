@@ -181,7 +181,7 @@ agent_created: true
 
 ## 12. junction 的"是链接"每个工具答得不一样；吃掉目标的是尾反斜杠和 `del /f /s /q`
 
-- **现象**（本机实测；样本均为 junction：`%USERPROFILE%\.trae-cn\skills` → `<工作区>\trae-data\skills`、`%USERPROFILE%\.agents\skills` → `<工作区>\agentskills`）：
+- **现象**（本机实测；样本均为 junction，品牌段用 `<客户端甲>`/`<客户端乙>` 占位——本节结论与品牌无关：`%USERPROFILE%\<客户端甲>\skills` → `<工作区>\<客户端甲数据>\skills`、`%USERPROFILE%\.agents\skills` → `<工作区>\agentskills`）：
   - PowerShell 5.1 `(Get-Item -Force <路径>).LinkType` → 这两个都是 `Junction`，`.Target` 是目标绝对路径；普通目录（`<工作区>\agentskills`）返回**空**。
   - Git Bash：`[ -L <链接> ]` 对 junction 报 **yes**（反斜杠原生写法与 `/d/…` POSIX 写法都 yes）。但**路径尾部多一个 `/` 或 `\` 就立刻变 no**——尾斜杠会先解析进目录再判断，答的是"这个目录不是链接"。同一个链接、同一次运行，两种写法答案相反：这里出错的是**路径形态**，不是 MSYS 不认 junction。
   - Python 3.12：`os.path.islink()` False；而 `pathlib.Path.is_junction()` True。
@@ -193,7 +193,7 @@ agent_created: true
   - 删链接前先确认它**本身是**重解析点；删除只用 `rmdir "<链接>"`（不带 `/s`）或 `Remove-Item -LiteralPath "<链接>" -Recurse -Force`——后者实测五种写法（带/不带尾反斜杠、`-LiteralPath`、`-Path`、目标里有只读文件）都是**链接没了、目标里的文件全在**，可以放心用。
   - **尾反斜杠是这里的真实开关**：同一条 `rmdir /s /q`，写 `"<链接>"` 只删链接，写成 `"<链接>\"` 就**穿透删掉目标里的内容**（两轮独立运行、`rmdir /s /q` 与 `rd /s /q` 两种写法都复现，链接与目标目录还在原地、里面已空）。`rmdir "<链接>\"` 不带 `/s` 又安全。也就是说：**危险不是 `/s /q` 这个参数组合，而是"路径以分隔符结尾 ⇒ 命令进到目标里面去删"**。
   - **无条件禁止**的是 `del /f /s /q "<链接>"`：不带尾反斜杠也照样穿透，退出码 0、打印"删除文件 - …"、链接本身反而还在（`linkGone=false` 而目标里的文件已消失，三次独立复现）。这就是"删链接把别人数据删了"的真身。
-  - 嵌套情形要当心：`%USERPROFILE%\.codex` 是 junction → `<工作区>\codex`；但 `.codex\skills` 不是重解析点（`fsutil` 报 `文件或目录不是重解析点`、`LinkType` 空），它是**穿过**上层 junction 落在目标里的真目录——此时 PowerShell 的 `[string] $i.Target` 还能给出一个看起来合法、实际不存在的前缀路径（它给的是 `C:\<工作区名>\codex\skills`，而该路径 `Test-Path` 为 false；Node `realpathSync` 给的是 `<工作区>\codex\skills`）。**LinkType 为空时就不要读 Target。**
+  - 嵌套情形要当心：`%USERPROFILE%\<客户端乙>` 是 junction → `<工作区>\<客户端乙>`；但 `<客户端乙>\skills` 不是重解析点（`fsutil` 报 `文件或目录不是重解析点`、`LinkType` 空），它是**穿过**上层 junction 落在目标里的真目录——此时 PowerShell 的 `[string] $i.Target` 还能给出一个看起来合法、实际不存在的前缀路径（它给的是 `C:\<工作区名>\<客户端乙>\skills`，而该路径 `Test-Path` 为 false；Node `realpathSync` 给的是 `<工作区>\<客户端乙>\skills`）。**LinkType 为空时就不要读 Target。**
   - git：把 junction 放进工作树，`core.symlinks=false` 管不了它，Git 会把目标整棵树当普通内容——实测 `git add link` 后 `git status` 是 `A  link/file0.txt`（目标里 4 个文件全部入库）；跨副本仓库里一个 junction 就能把几百 MB 拉进提交。
   - 通过 junction 进仓库目录（`cd link && git …`、`git -C "<junction>"`、Node `spawnSync(..., {cwd})`）都是**正常解析到真身**的，`rev-parse --show-toplevel` 返回真实路径，不必绕开。
 - **判定**：① 识别：`fsutil reparsepoint query <路径>` 退出码 0 且输出含 `0xa0000003` ⇒ 是 junction（普通目录 ⇒ 退出码 1、`文件或目录不是重解析点`）；② `Get-Item -Force <路径>` 的 `LinkType` 等于 `Junction` ⇒ 是链接，`Target` 可读；③ 删除安全性，用一次抛弃型实测证明（只在一次性 scratch 目录里做，目标自己造）：建 `tgt\keep.txt` 与 `tgt\sub\deep.txt`，`mklink /J lnk tgt`，然后**同一命令两种写法各跑一遍**——

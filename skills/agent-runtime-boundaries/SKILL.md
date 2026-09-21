@@ -149,7 +149,7 @@ agent_created: true
 
 ## 12. 派活归属存在两个地方，而"看谁在干"的那个视图不读你写进去的那张表
 
-- **现象**（本机实测）：用 `assign <任务> <身份>` 把一张长期卡派给 4 个协作方，四条命令**全部回显成功**（`Assigned #4 to … — notification left in their inbox`），归属表里也确实有 4 行。可是任何一个协作方跑聚合视图 `status` 看"未完成的活"那一栏，这一条显示的仍是 `(unclaimed)`——看起来像没人管。更绕的是同一份数据在另一个视图里是对的：明细看板 `tasks` 显示 `80% ←pi,dsh,trae,workbuddy`。**两次读，两个结论。**
+- **现象**（本机实测）：用 `assign <任务> <身份>` 把一张长期卡派给 4 个协作方，四条命令**全部回显成功**（`Assigned #4 to … — notification left in their inbox`），归属表里也确实有 4 行。可是任何一个协作方跑聚合视图 `status` 看"未完成的活"那一栏，这一条显示的仍是 `(unclaimed)`——看起来像没人管。更绕的是同一份数据在另一个视图里是对的：明细看板 `tasks` 显示 `80% ←<身份甲>,<身份乙>,<身份丙>,<身份丁>`（协作方身份名此处略，与结论无关）。**两次读，两个结论。**
 - **根因**：归属写进**两张地方**，读视图各取一张。`assign()` 落的是多对多的 `task_assignees`（源码里那句是 `INSERT OR IGNORE INTO task_assignees …`），随后**无条件**再调 `message()` 投一条收件箱、`append()` 追加一条时间线；而任务行上的 `claimed_by` 只有 `claim` 会写。聚合视图渲染那行的代码是 `t.claimedBy ? '← ' + t.claimedBy : '(unclaimed)'`——**它压根没查 assignees 表**（同一个包里另有把两处并起来读的函数 `activeAgentsOnTask()`，只是这个视图没用它）。所以不是写失败，是汇总视图漏了一张表。
 - **对策**：① **别把归属字段当送达信号**——派活真正会被对方读到的是它自动投进收件箱的那条 message，送达自查看 `outbox`；② 对外说"谁在做这张卡"时读**明细看板**或直查 `task_assignees`，不要引用聚合视图那一行；③ 想让一张卡有单一持有人，另外走 `claim`（它才写 `claimed_by`，且别人已 claim 时会报 CONFLICT）；④ **重复 assign 修不好显示**：那句是 `OR IGNORE`，重派只会多投一条收件箱 + 多落一条时间线，归属行数不变、显示照旧，而回显仍是"Assigned"——典型的"命令成功但事情没成"。
 - **判定**：
