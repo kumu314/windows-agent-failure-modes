@@ -159,6 +159,8 @@ gh api --method PUT repos/<owner>/<repo>/contents/<path> \
 - **判定**：任何"远端已经是新的 / CI 已经过了"的结论，必须能指出**一条与被核验提交绑定的读数字段**——`ls-remote` 的 sha、raw 响应的哈希、run 页或 REST 里的 `head_sha`，三者全无 = 只是断言。两条反向自检**都要做**：把提交号换成一个瞎写的值再取一次徽章，**返回没变就说明这条证据本来就不成立**；把同一 API URL 连打两次，第二次 403 就说明这条通路不可依赖，改走 ②③。
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457（zh-CN）· git 2.53.0.windows.2 · Git Bash 5.2.37(1)-release(x86_64-pc-msys) · 本机 `<端口>` 出口代理（curl 与 git 共用）· 2026-09-21
   （实测：徽章四次喂值 1282 字节、md5 前 8 位全等；REST 首打 200，取到 `head_sha=9e77fb3eaa…`、`status=completed`、`conclusion=success`、`event=push`、`total_count=8`，同一分钟再打即 `403 rate limit exceeded`、`Remaining: 0`（未认证限额 60，出口 IP 与他人共享）；HTML 兜底通路取到 run `35562276962` 同段内完整 40 位 sha + `completed successfully`，run 页标题含提交标题与 `@9e77fb3`；`ls-remote` 回 `9e77fb3eaa…`；公网 raw 逐文件 md5 与 HEAD blob 6/6 相同。**未测到的部分**：配额 reset 只读过一次响应头，没做长轮询确认恢复时长；"中间提交无 run"是在一次 3 提交的 push 上观察的，n=1。）
+- **复测出入（2026-09-21 · 同机同代理，改的是上面 ③ 的退路顺序）**：`③` 那句"一旦 403 就退到 HTML"**当天就失灵了**——`…/actions/workflows/<file>.html` 匿名 `curl` 回 **200 / 248 695 字节**，但整页 `/actions/runs/` 出现 **0 处**、`"head_sha"`/`"conclusion"`/`"run_number"` 这些键也全 0（run 列表改由前端再取一次）。⇒ 照旧写法会把"切不到 run"读成"没有 run"，而且 `commit/<sha>` 页同样是客户端渲染（574 332 字节里 `lint` 出现 0 次），所以这不是"最近没跑 CI"，是**匿名 HTML 这条路已经不给数据**。
+  当天真正可用的退路是**带凭据的同一个 REST**：`HTTPS_PROXY=http://127.0.0.1:<端口> gh api "repos/<owner>/<repo>/actions/runs?per_page=3"`，一次就回 `9 e3b30dd9 lint completed/success`——token 走另一档配额，不吃匿名那 60/h。**新顺序**：① 未认证 REST → ② 403 就换已认证 CLI 打**同一个 REST**（别换端点、别换参数） → ③ HTML 页只当"站点活着"的旁证；真要拿它做判据，先在同一页面上喂一个**已知存在的串**自证抓取面有内容，否则它的 0 命中不算读数。
 
 ## 复用信号
 
