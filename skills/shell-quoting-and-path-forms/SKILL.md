@@ -115,7 +115,20 @@ agent_created: true
 - **现象**：把 `D:\some dir\plugin` 交给一个内部用 `spawn(..., { shell: true })` 转发参数的工具（包管理器、构建器、agent 自己的 CLI 壳），结果清单里凭空多出 `some`、`dir-plugin` 之类的垃圾依赖条目，命令没明确失败。
 - **根因**：Windows 下 `shell: true` 不给含空格参数补引号，cmd 按空格切词。
 - **对策**：① 首选消除空格——取 8.3 短路径再传：`cmd /c "for %I in (\"D:\some dir\") do @echo %~sI"` → `D:\SOME~1`；② 或把工作目录搬到无空格路径；③ 事后务必核对清单文件（`package.json` 等）被写进了什么，逐条撤销，注意别删**本来就存在的同名条目**。
-- **判定**：报错里出现"路径的前半截"当目录名（`D:/some`）即 100% 命中。
+- **判定（2026-09-21 改写：原判定只覆盖“下游恰好崩掉”那一半，本轮实测它连报错都没有）**：不要等报错，**数 argv**。在转发层前面挂一个打印 `process.argv.length` 的探测脚本，`ARGC` 大于预期参数个数即命中。纯转发路径上外层 `rc=0`、内层 `status=0`、stderr 只有 Node 自己那条拼接警告；至于下游会不会把路径前半截当目录名去用（露出 `D:/some` 这种字样），那是运气，不是判据。
+
+- **复测（2026-09-21）：拆词与"静默"两半都成立，而且正斜杠不免疫；短名对策实测能把 `ARGC` 堵回 1**。造一个最小转发层（`spawnSync(node, [探测脚本, 目标路径], { shell: true })`），目标取 `…\some dir\plugin`：
+  - `shell:false` 对照组：反斜杠形态与正斜杠形态都是 `ARGC=1`，整串原样到达。
+  - `shell:true`：两种形态**都**被切成 `ARGC=2`（`…\some` + `dir\plugin`；正斜杠版 `…/some` + `dir/plugin`）。⇒ "把路径改成斜杠"不是缓解手段。
+  - 全程 `status=0`、外层 `rc=0`，stderr 里除了 Node 自己那条弃用警告一个字都没有：`Passing args to a child process with shell option true … the arguments are not escaped, only concatenated` —— 这句就是本节的根因原文，遇到它等于当场命中。
+- **短名这条对策能用，但它的四种写法里三种会骗人**（同一份含空格目录；下文 `<短根>` 是当时那个临时工作目录的 8.3 形态，名字本身与结论无关，略去）：
+  - 正确：`cmd /c for %I in ("<含空格路径>") do @echo %~sI` → `<短根>\SOMEDI~1`（rc=0）。注意输出是**混合**样子：含空格的成分被换成 `XXXX~1` 形态，本来就不含空格的成分原样保留。把它回喂给上面那个 `shell:true` 转发层，`ARGC` 回到 **1** —— 坑确实被堵上。
+  - **漏引号不报错，而是编造**：去掉外层引号后 `%~sI` 迭代两次，给根本不存在的 `some`、`dir` 各造出一条"短路径"（`<短根>\some`）。两行输出看着全对。
+  - **批处理里要写 `%%~sI`**：同一路径放进 `.cmd` 却写 `%~sI` → `rc=255`、"批处理参数替换中的路径运算符的下列用法无效"。（我第一版探测脚本就是这么错的，白白报了一次"对策失效"。）
+  - **拆成参数列表交给 cmd 会静默给错值**：`subprocess.run(["cmd","/c", 'for %I in ("…") do @echo %~sI'])` 这种列表形态下引号被二次转义，输出 `D:\"…\some dir\"` —— **没短路、没报错、rc=0**。整条命令行作为**单个字符串**交下去才对。⇒ 写自动化时宁可落一个 `.cmd` 文件（记得 `%%I`），不要用参数列表喂 cmd。
+- **别去查"8.3 开没开"**：`fsutil 8dot3name query D:` 与 `… query <目录>` 在非管理员令牌下都是 `rc=1 / 错误 5 拒绝访问`。要短名就直接要：`GetShortPathNameW` 在同一目录上返回 `<短根>\SOMEDI~1\plugin`，随后 `exists`/`isDirectory` 均为真。⇒ 判据是"拿到结果后检查里面还有没有空格"，而不是先跑一条自己就没权限的命令。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457（zh-CN）· Node v24.18.0（`spawnSync(..., {shell:true})`）· cmd 10.0 · Python 3.12.10（ctypes 调 `GetShortPathNameW`）· 2026-09-21
+  （四组 fwd 读数 + 三组短名通道为同批；`shell:false` 对照组两形态均 `ARGC=1`。）
 
 ## 9. 单一否定结果不要当结论
 
