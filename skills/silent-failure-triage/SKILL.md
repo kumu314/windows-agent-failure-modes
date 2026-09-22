@@ -62,11 +62,12 @@ agent_created: true
 ## 5. 反过来的"假陈旧"：代理缓存了 ref  advertisement
 
 - **现象**：刚合并完 PR，`git fetch origin main` 成功、exit 0，但 `origin/main` 指向几小时前的提交，当天合并的几条全"不见了"——看起来像远端被 force-push 回滚。
-- **根因**：出口代理缓存了 smart HTTP 的 `GET /info/refs?service=git-upload-pack` 响应；而 push 走 POST 不被缓存，于是出现"push 成功 / fetch 拉回旧状态"这种自相矛盾。
-- **对策**：换 URL 形态就换缓存键（加 `.git`、加 `www.` 任一）：`git -c http.proxy=http://127.0.0.1:<端口> fetch https://www.github.com/<owner>/<repo>.git main`，再读 `git rev-parse FETCH_HEAD`。
-- **判定**：用 API 取权威值 `gh api repos/<owner>/<repo>/branches/main --jq .commit.sha`。**API 说新、fetch 说旧 = 缓存问题，不是仓库问题**。它与 §4、与"真·基线陈旧"（§6）症状几乎相同、处置完全相反，判错会做一堆多余的"补救"写回旧基线。
+- **根因**：出口代理缓存了 smart HTTP 的 `GET /info/refs?service=git-upload-pack` 响应——这份 advertisement 里就是全量 ref 列表，客户端照着它挑 ref 更新；而 push 走 POST 不被缓存，于是出现"push 成功 / fetch 拉回旧状态"这种自相矛盾。
+- **对策**：**换 URL 形态就换缓存键**（缓存层按完整 URL 建键），例如 `git -c http.proxy=http://127.0.0.1:<端口> fetch <换形态后的 URL> main`，再读 `git rev-parse FETCH_HEAD`。实测可用的两种改法：**去掉尾部 `.git`**、**换 host 写法**（`127.0.0.1` → `localhost`；对 GitHub 即 `github.com` ↔ `www.github.com` 这一类，`www.` 形态本轮未单独测）。**不要用加查询串**（`?cb=1`）：git 会把它拼进路径后报 `fatal: repository 'http://…/origin.git?cb=1/' not found`、退出码 128（curl 侧看到真实请求行被改写成 `GET /origin.git?cb=1/info/refs&service=git-upload-pack`、源回 404 ⇒ 它是死在源上，不是死在缓存上）。
+- **判定**：用权威端点取真值 `gh api repos/<owner>/<repo>/branches/main --jq .commit.sha`，或 `git ls-remote` **绕过代理**直问远端。**权威说新、走代理 fetch 说旧 = 缓存问题，不是仓库问题**。换键追平后还要回头验一次**原 URL**：它走代理仍是旧的（换键 ≠ 清缓存），别把"下次又旧了"当成新故障。它与 §4、与"真·基线陈旧"（§6）症状几乎相同、处置完全相反，判错会做一堆多余的"补救"写回旧基线。
 
-- **状态**：复盘条目（本轮**未架真实缓存代理**，无法照原样复测。已核实的不变事实：`git ls-remote`/`fetch` 对同一仓库的两种 URL 形态（含/不含查询串或后缀差异）走不同请求，缓存层按 URL 建键；本机 loopback 桩服务器与 git 的 smart-HTTP 会话未接通（`git ls-remote` 侧 `status=null`、无输出），该探测**未测到**结论，不作证据。需要真代理时另立复测。）
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · Node v24.18.0 · 2026-09-22
+  （实测：本机自建假 origin（Node smart-HTTP，供 `/info/refs?service=git-upload-pack`）+ 本机 cache-first 代理桩（回显 `X-Cache: HIT/MISS`、按 URL 计数），**全程 loopback，不碰外网**。四组读数：① 源 `update-ref` 前进到 c2 后，走代理 `fetch` rc=0、stderr 空，客户端 `origin/main` 仍是 c1（假陈旧成立=True），同刻直连 `ls-remote` 与新＝真值含 c2 ⇒ 归因对照：把客户端拨回 c1、**只**把通道换成直连，`fetch` 就追平 c2（陈旧由代理缓存造成，不是 git 侧）；② 代理日志同一缓存键 `MISS` 后 `HIT`；③ 写侧另一半：`push` 新分支 rc=0 且直连全量 refs 里有它、走代理 refs 看不见 ⇒ 写侧当场生效、读侧看不见=True；④ 对策三写法：去掉 `.git` rc=0 拿到新值、host 换 localhost rc=0 拿到新值、加查询串 rc=128。收尾：换键追平后原 URL 走代理仍旧 c1（绕过靠换键不是清缓存）；最终代理计数 hits=5 misses=4 posts=2、缓存键 4 个。全部在一次性 scratch 目录与 loopback 端口内，未碰真实远端。）
 
 ## 6. 陈旧基线：把队友的产出整片删掉
 
@@ -78,14 +79,19 @@ agent_created: true
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · git 2.53.0.windows.2 · 2026-09-17
   （实测：把 origin/main 冻结在旧提交后，`merge-base` 年龄显示"刚发生"、`diff --stat origin/main..HEAD` 是 `3 deletions(-)` 而 `--numstat` 给出 `0\t1\ta.txt` 形态=净删无对应提交；`ls-tree -r HEAD --name-only` 里关键文件缺失；真跑一次 `fetch` 后 origin/main 前进、幻影删除消失。全部在 temp 自建假目录内。）
 
-## 7. `exit 0` 但事情没做成：GitHub 侧三例
+## 7. `exit 0` 但事情没做成：GitHub 侧四例
 
 - **`gh pr merge`**：可能报 `Post "https://api.github.com/graphql": EOF`，也可能**退出码 0 而 PR 仍是 OPEN**——以为合了其实没合。合并动作之后必须复核 `gh pr view <n> --json state,mergedAt` 看到 `MERGED`；`--delete-branch` 放到确认之后再单独补一次调用。
 - **`PATCH` 返回 200 但字段没生效**：改仓库 `topics` 要单独 `PUT /repos/<o>/<r>/topics`，塞在 PATCH 里会被静默忽略。凡"API 调用成功但结果不对"，先 dump 一条原始响应看字段真实值与大小写（CI 的 `status`/`conclusion` 是小写 `completed`/`success`）。
-- **403 正文里有关键信息**：例如"make this repository public to enable this feature"——只看状态码会漏掉可执行的下一步。
-- **推成功 ≠ 可访问**：仓库仍是 private 时页面 404，而 API 侧 commit 已存在。
+- **403 正文里有关键信息**：只看状态码会漏掉可执行的下一步。实测一例**必须先看正文再看码**的形状：同一个只读 `GET /repos/<o>/<r>`，走共享出口代理时 403、正文是 `API rate limit exceeded for <那个出口 IP>. … Authenticated requests get a higher rate limit` + `documentation_url`，而**同一时刻换直连同一 URL 就是 200**。⇒ 这条 403 与"你没权限 / 仓库不存在"毫无关系，它是**通道**故障（未认证配额被同 IP 的人用光了），正解是带认证或换通道，不是去改仓库。原记的另一例（"make this repository public to enable this feature"，Pages 类功能未开）本轮**未复现**，按复盘保留。
+- **推成功 ≠ 可访问**：仓库仍是 private 时页面 404，而 API 侧 commit 已存在。**这条本轮已实测**（读侧形状）：同一账号两个私有仓，鉴权 `GET /repos/<o>/<r>/contents` 读得到文件 ⇒ 推送与内容都在，未鉴权 `raw.githubusercontent.com/<o>/<r>/<branch>/<file>` 却回 **404**；而"该仓根本不存在"的 URL 同样回 404 ⇒ **对外看起来像仓库没了，不是权限问题**；同账号的公开仓 `README.md` 回 200 可作正控。（"页面 404"这一路本轮走的是 raw 形态，github.com 网页形态未单独取数。）
 
-- **状态**：复盘条目（本轮无外网写操作配额，未执行 `gh pr merge` / `PATCH topics` / 403 / private-access 四类真实动作。已核实的前置：`gh --version` = 2.97.0、`gh auth status` 退出 0 且已登录 github.com。四条的**判定命令**（`gh pr view <n> --json state,mergedAt`、原始响应 dump、`PUT /repos/<o>/<r>/topics`）本轮**未测到**落地证据。）
+- **判定（读侧已实测的那条）**：凡"API 调用成功但结果不对"，先把**一条原始响应整条 dump 出来**，看字段的真实值与大小写——实测 CI 侧就是小写 `status='completed'` / `conclusion='success'`（同一仓库连续两条 run 字段形状一致），拿 `Success`/`COMPLETE` 去比会得到恒假的"还没完成"。
+- **写侧（本轮未执行，保持复盘）**：`gh pr merge` 报 EOF、以及"退出码 0 但 PR 仍 OPEN"、`PATCH` 200 而 `topics` 没生效要走 `PUT`——这四类动作全都要对真远端做写操作（合并 / 改仓库元数据），需要维护者授权与一次性靶场，本轮没有跑。它们的**复核命令**照原样保留（合并后 `gh pr view <n> --json state,mergedAt` 必须看到 `MERGED`；`--delete-branch` 放到确认之后再单独补一次调用），但**不当作已验证的读数**。
+
+- **状态**：**读侧已实测 / 写侧未复测**。已实测部分见下面验证于（403 正文与通道对照、CI 字段大小写、私有 raw 404 vs 公开 200、`gh --version` 2.97.0、`gh auth status` 退出 0 且已登录 github.com）。未复测部分 = 上面「写侧」四条真动作；待维护者点头后需要的一次性靶场：一个 scratch 仓库 + 一个 PR（走完 建分支 → 开 PR → `gh pr merge` → 复核 `state,mergedAt` → `push --delete`），以及 `PATCH` 与 `PUT topics` 的对照。
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · Python 3.12.10 子进程调 System32 的 curl 8.21.0 + gh 2.97.0 · 2026-09-22
+  （实测：未认证走代理 `GET /repos/<o>/<r>` → `http=403` 正文含 `API rate limit exceeded for <共享出口 IP>` 与 `documentation_url`；同一 URL 同一时刻直连 → `http=200` 且正文是该仓库的 JSON（`private:false`、`full_name` 等字段俱在）⇒ 403 归因于通道而非权限。CI 字段：本仓 run #13 与 #12 均为 `status='completed'`、`conclusion='success'`（原始大小写，小写）。可见性：两个私有仓（鉴权 contents 可见）未鉴权 raw 分别 `http=404`（其中一个首两次给出 `http=000`＝通道噪声，重试才拿到真码）、"不存在的仓"同样 404（一次 000 一次 404）、本机公开仓 README `http=200` ⇒ 私有与不存在对外同形。私有标识与出口 IP 均不进正文。）
 
 ## 8. 计划任务：注册了，但永远不会跑
 
