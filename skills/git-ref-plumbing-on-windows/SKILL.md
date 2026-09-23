@@ -113,11 +113,19 @@ agent_created: true
 - **现象**：清理"看起来是模板产物"的分支时，差点删掉队友当天刚推的有效工作。
 - **对策**：`GET /repos/<o>/<r>/branches?per_page=100` 全量列（**默认每页 30 条会漏**：实测某公共大仓库默认取数恰好回 **30** 条，`Link` 头里 `rel="next"`→page=2、`rel="last"`→page=175，而 `per_page=100` 回 100 条 ⇒ 同一请求两种形态差 **70** 条）→ 对每个候选查 `GET /pulls?state=all&head=<owner>:<branch>` 确认它合并过 → 再删 → 验证终态。删除用带重试的脚本并打印每个 HTTP 码，不要手点。
 - **判定**：`head=` 那条查询是"这分支进没进过主干"的权威依据，**但它对"标签写错"和"真没有 PR"给出同一个形状**（实测：正确标签 → 200、命中 1 条并带 `merged_at`；随便编一个不存在的标签 → 同样 200、命中 **0** 条）。所以**空集之前必须先跑正控**——拿一个你确知有 PR 的分支跑同一条查询看它是否命中，命中了才信下一句的空集；否则一次拼写错误就会被读成"这分支没主，删掉安全"，方向正好反了。拿不准就不删，问一句比恢复便宜。
-- **顺手一条**：`git push --delete` 不稳时改走 API 删 ref（`DELETE /repos/<o>/<r>/git/refs/heads/<name>`，204 即成功）。
+- **顺手一条（本轮实测细化）**：`git push --delete` 不稳时改走 API 删 ref（`DELETE /repos/<o>/<r>/git/refs/heads/<name>`）。两条通道的真实形状：
+  - **REST 删成功 = 204、`size_download=0`、落盘是空文件** ⇒ 成功那一跳不带任何可核对信息，"删没删成"只能靠下一步读，不能靠这一跳的正文。
+  - **删后单分支 GET 与"从未存在的分支"GET 逐字节相同**：都是 404 / 128 B，`cmp` 两份正文无差异 ⇒ **`GET /git/ref/heads/<b>` 区分不了"删掉了"和"从来没建过"**。终态判据改用**列表**：`GET /branches` 里目标消失（本轮列表 = `main` 加一条本轮未删的 PR 分支，正文 515 B），与 `git ls-remote --heads` 同刻一致。
+  - **同一分支再删一次 = 422 / 146 B**，正文 `Reference does not exist` ⇒ 重复删不静默。别把 404 的字节数当跨端点常量：get-a-reference 的 404 是 128 B，"取某命名空间下的引用"那条端点的 404 是 146 B。
+  - **`git push --delete origin <b>`：rc=0**，输出两行 `To https://github.com/…` 与 `- [deleted]         <b>`；删后 `ls-remote --heads` 走代理与直连**同刻同一份** ⇒ 本轮未出现 advertisement 陈旧（silent-failure-triage §5 那类），但不等于不会有。
+  - **漏带 token 的删除不会执行，却会伪装成"做完了"**：未鉴权 `DELETE` = 401 / 120 B `Requires authentication`。只打印 rc 与状态码的脚本会把 401 记成"这一跳已尝试"，判据被污染；未鉴权 `GET` 的码还跨轮不稳 ⇒ **"读不到"永远不等于"不存在"**。
+  - "带重试 + 逐跳打印 HTTP 码"本轮照原样用了（对 `000`/`429`/`5xx` 至多重试 4 次），实测抓到两次瞬时 TLS 失败、重试后才拿到真码。同时记一笔反面：**加正控门禁之前的那一版脚本，在 `建 probe-x push rc=128` 之后仍继续往下记"删后 = 404"——那是一条假读数**。⇒ 重试和正控不是锦上添花：没有正控，404 会被读成"删除成功"。
 
-- **状态**：**读侧已实测**（分页形状 + `head=` 查询的命中/空集两种返回，见下面验证于）。**写侧未复测**：真删远端分支不可逆、push/DELETE 权限只在维护者手里，本轮没有对任何真远端发过 `DELETE` 或 `git push --delete` ⇒ "204 即成功"与"带重试脚本 + 打印每个 HTTP 码"这两条仍按原结论保留，待有授权的回合再量。
+- **状态**：**读侧与写侧均已实测**。读侧 = 分页形状 + `head=` 查询的命中/空集两种返回（2026-09-22 戳）；写侧 = 两条删除通道（REST `DELETE …/git/refs/heads/<b>` 与 `git push --delete`）+ 删后终态判据，在一次性靶场仓上按维护者授权执行（2026-09-23 戳）。**仍未量**：多分支批量删（本轮两分支各单发、一分支一条通道）、删错后的恢复路径（未做，也不建议拿真仓试）。
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · Python 3.12.10 子进程调 System32 的 curl 8.21.0（`api.github.com` 只读 GET，未认证走直连）+ gh 2.97.0 · 2026-09-22
   （实测取值：默认 `?` 无参数 → rc=0 / 200 / 条数 30，`Link: <…branches?page=2>; rel="next", <…branches?page=175>; rel="last"`；`per_page=100` → 100 条；`per_page=100&page=2` → 100 条 ⇒ 该仓分支总数下界 200。`head=` 正控三条：`microsoft:benibenj/agents/…` → 200 命中 1 条（PR 337237，`merged=true`，`merged_at=2026-09-22T09:38:24Z`），另两条 closed+merged 的 `head.label` 同形状；负控：不存在的 head → 200 命中 0 条。样本只取公共仓库，未认证；无写操作。）
+- **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · git 2.53.0.windows.2 · Python 3.12.10 子进程调 System32 的 curl 8.21.0（写操作带认证走代理）· 2026-09-23
+  （靶场仓内自建 `probe-x` / `probe-y`：鉴权正控 `GET /git/ref/heads/probe-x` = 200 / 403 B → `DELETE /git/refs/heads/probe-x` = **204 / 0 B / 空正文** → 删后 GET = 404 / 128 B、"从未存在"GET = 404 / 128 B、`cmp` 逐字节相同 → 再 DELETE = 422 / 146 B；`push --delete origin probe-y` rc=0 且回 `- [deleted]`；终态 `GET /branches` = 只剩 `main` 与那条本轮未删的 PR 分支（正文 515 B），代理与直连两路 `ls-remote --heads` 同刻同份；未鉴权 `DELETE` = 401 / 120 B。写操作只在靶场仓，未触及任何真实项目仓；靶场仓名与共享出口 IP 不进正文。）
 
 ## 11. `-d` 传给 `git filter-branch` 的是它要 `rm -rf` 的临时目录：配 `-f` 时你的输入文件会先被删掉，而命令退出码 0
 
