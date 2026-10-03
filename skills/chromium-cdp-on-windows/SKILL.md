@@ -66,6 +66,25 @@ agent_created: true
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457（zh-CN）· Chrome 153.0.8010.48 · 有头与 `--headless=new` 各一组 · 2026-09-21
   （五组试验：有头 1关1 / 有头 2关1 / 无头 1关1 / 无头 2关1 / 无头 2关2，全部按标记数进程；收尾各标记残留 0。）
 
+### 精准清理的代码形状（含安全阀）
+```python
+import json,urllib.request
+d=json.load(urllib.request.urlopen("http://127.0.0.1:9222/json/list",timeout=5))
+pages=[t for t in d if t.get('type')=='page']
+seen={}; close_ids=[]
+for t in pages:
+    u=t.get('url','')
+    if u in seen: close_ids.append(t['id'])   # 只关脚本自己开的重复业务页
+    else: seen[u]=t['id']
+if len(pages) - len(close_ids) <= 0 and close_ids:
+    keep = close_ids.pop()                    # ⛔ 安全阀：绝不让 page 归零
+    print("SAFETY: 保留一个 page 防 Chrome 整体退出:", keep)
+for i in close_ids:
+    try: urllib.request.urlopen("http://127.0.0.1:9222/json/close/"+i,timeout=5)
+    except: pass
+```
+- **这段的判据（2026-10-04 用合成 target 列表跑过五组）**：按 URL 去重时每种 URL 至少留一个，所以"剩余 page"恒 ≥1（全重复 3→1、单页 1→1、混合 4→2、两条不同 URL 2→2）；把候选规则改成"全关"时安全阀才接管（4 个候选弹出 1 个后剩 1）。⇒ 安全阀在按 URL 去重的写法下永远不会触发，它防的是你事后改掉候选规则（按标题前缀关、按索引关）——别把它当装饰删掉。
+
 ## 4. target 堆积会让握手挂起（先数，再动手）
 
 - **现象**：`connect_over_cdp` 挂住无响应、最终超时；或连上了但 `evaluate` / `new_page` 卡住。看起来像网络问题。
@@ -159,9 +178,50 @@ agent_created: true
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · Chrome 153.0.8010.48 · 2026-09-18
 - **复测差异（2026-09-18 · ZCode Bash 工具环境）**：**未复现**回收——`&` 后台启动的隔离调试 Chrome 在两个**独立工具调用**之间持续存活（第二次调用 `curl /json/version` 仍返回完整 JSON），直到手动按 PID 终止。原结论保留（回收行为取决于宿主工具的实现，本条描述的情形可能适用于其他 agent 宿主）；判定方法不变：跨调用探测两次，一次拿得到、一次拿不到即命中。
 
+## 11. 长任务断连恢复：浏览器被外部干掉后，脚本怎么活下来
+
+§3 管"bot 别自爆"，这一节管"外部把浏览器关掉后 bot 怎么活下来"。数小时的整轮批量任务（本机实盘：15 条成片生成+发布，约 2.5–3 小时）不可能保证调试 Chrome 全程不被用户或系统关掉，所以**脚本必须设计成能从断连恢复**，否则整轮崩在半路、进度全丢。
+
+- **现象**（本机一整轮批量任务的运行日志，2026-08-16）：不带重连的第一版跑到第 3 条时调试 Chrome 被外部关闭，之后每次 `pg.evaluate` 全抛 `TargetClosedError`，整轮崩在半路（该版日志止于 `01:57:17 generation started`，共 3,514 字节，此后无输出）。换成带重连的版本后，同日又断 **2 次**（16:59:11 起、17:20:08 起），两次都自愈。
+- **根因**：两件事叠加——① 把 `connect_over_cdp` 拿到的 browser 对象当永久资源用，对端一死后续每次调用都抛异常，而不是触发重连；② 进度只在内存里，一崩就归零。都不是业务逻辑错，改选择器没用，要改结构。
+- **对策**（这五条的形状都在当天日志里逐条命中）：
+  1. **绝不 `browser.close()`，`finally` 里也不关**；清理只关脚本自己开的重复业务页，并保证留 ≥1 个 page（§3）。
+  2. **外层套一个重连循环**，把整轮任务包住：每次 connect 之前先用 HTTP `/json/version` 探活（5 秒超时），探不到就 `sleep` 等用户把调试 Chrome 重新打开，探到了才 `connect_over_cdp`；对连接与每个页面操作统一 `try/except` 捕获 `TargetClosedError`/`TimeoutError`，捕获后回到循环顶部重来。
+  3. **每完成一条就落盘**：`done += 1` 写状态 JSON 并 `flush`，重连后从落盘的 `done` 续跑，配合"已做项标识集合"不重发已完成项。
+  4. **状态里除计数外还要存可读标识**（已做项的文本/键、当前第几条、剩余额度一类），这样浏览器复活后脚本能续传，用户或另一个会话也能只读那个 JSON 就判断进度、人工接续。
+  5. **动手前提醒用户**：长任务期间不要关带调试端口的那个 Chrome 窗口；非要关就先停脚本（或接受断点重连）。
+- **判定**（"自愈"在日志里长这样；逐条摘自本机当日带重连那一版的运行日志，54,102 字节，端口与业务名略去）：
+  ```
+  16:59:11 [attempt 1] DISCONNECTED: TimeoutError('BrowserType.connect_over_cdp: Timeout 30000ms exceeded.
+  16:59:12 Chrome gone […] waiting 60s then reconnect (loop forever until done)...
+  17:01:50 [attempt 3] connected, resuming from done=2
+  17:20:08 [attempt 3] DISCONNECTED: TargetClosedError('Page.evaluate: Target page, context or browser has been closed')
+  17:24:25 [attempt 4] connected, resuming from done=3
+  18:40:37 FINAL done=15
+  ```
+  （`[…]` 处日志原文是一个在本机编码下已花屏的连接符，不是我省略了内容；同类"Chrome gone"等待行当天出现 3 次，对应两次断开里的前一次重试了 2 回。）判据是**重连后 `resuming from done=<n>` 里的 n 必须等于断开前落盘的值**（本机 2→3→15 单调不回退），这才是"进度零丢失"的可核对形式；"看起来整轮跑完了"不算证据。
+- **一条与 §5 第 3 步不同的读数（诚实记录，不动 §5 原文）**：常被引用的"把 connect timeout 提到 60000 就不超时了"在本机**查无实装痕迹**——当天这套批量脚本里 6 处 `connect_over_cdp`（分布在 4 个脚本）全部写 `timeout=30000`，全盘搜 `connect_over_cdp(…timeout=60000)` 命中 0；日志里两次 `Timeout 30000ms exceeded` 确实发生，最终连上靠的是**探活 + 退避重试**（第 3、4 次）。⇒ §5 那句按"未经本机验证的缓解建议"理解即可，硬判据仍是"先 `/json/version` 探活成功再 connect，失败就退避重试"。
+- **状态**：复盘条目 + 一手记录复核。整轮断连不可重演（不能真的去关用户正在用的浏览器），但 2026-10-04 重读了当日运行日志与批量脚本源码，上面 6 行读数与 6 处 timeout 取值逐条取自原始文件；未在本机第二种宿主、第二种长任务上复跑。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · Python 3.12.10（重读一手日志与脚本源码 + 合成 target 列表跑安全阀）· 2026-10-04
+
 ## 复用信号
 
 "连不上 9222" → §1（profile）或 agent 起的进程被回收（§10）；"curl 通 Chrome 不通" → §2；"越用越卡/握手挂" → §4；"跑到一半 TargetClosedError" → §5 + §10；"复制了 Cookie 还是登录页" → §7；"接口 200 但没登录" → §8。
+
+## 症状 → 根因 → 节 对照
+
+| 现象 | 去哪节 |
+|---|---|
+| 端口起了但没在听、"正在现有会话中打开" | §1 |
+| curl 通、Chrome 超时 | §2 |
+| 关页面后整个 Chrome 退出 / 会话丢失 | §3 |
+| 握手挂起、越用越卡、evaluate 卡住 | §4 → §5 |
+| 跑到一半 TargetClosedError（浏览器被外部关掉） | §11（重连顺序先按 §5） |
+| taskkill/Stop-Process 后进程还在、无报错 | §6 |
+| 复制了 Cookie 还是登录页 | §7 |
+| 接口 200 但其实没登录 | §8 |
+| new_page 空白 / 登录态没生效 | §9 |
+| agent 起的 Chrome 跨调用消失 | §10 |
 
 ## 本轮复测范围（2026-09-18）
 
