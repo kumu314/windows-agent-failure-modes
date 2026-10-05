@@ -8,11 +8,11 @@
 
 ## 装机
 
-把 `skills/` 下你想用的目录整个复制进你 agent 的技能目录即可（Claude Code `~/.claude/skills`、
-Codex `~/.codex/skills`、或任何读 `~/.agents/skills` 的客户端）：
+把 `skills/` 下你想用的目录整个复制进你 agent 的技能目录即可（各家客户端的技能目录形态不同，
+常见写法是 `~/.<客户端名>/skills`，也有统一读 `~/.agents/skills` 的）：
 
 ```bash
-cp -r skills/* ~/.claude/skills/
+cp -r skills/* ~/.agents/skills/
 ```
 
 无需重启；agent 会在匹配的场景自动读取。不想用 agent 的话，当普通故障排查手册读也行——
