@@ -208,8 +208,8 @@ agent_created: true
 
 ## 14. 用 A 组件的配置去断言 B 组件的行为：一次真实的错判
 
-- **现象**（本机实测）：看到派活守护的配置里写着 route: { workbuddy: codex }（agent-bridge/daemon.config.json），于是我断言「派给 workbuddy 的黑板任务都会转交 codex，所以它收不到」，并进一步写成「workbuddy 不存在自主巡逻黑板」。实际相反：我派的那张卡，workbuddy 自己回了执（带完整读数），而且它自己把卡标成了 cancelled；另有多轮 e2e 里 workbuddy 自己 claim / complete / message。那条断言是错的，差点被写进永久的教训库。
-- **根因**：把「某组件的配置」当成了「另一个组件被观测到的行为」。那行配置（daemon.js 里 execAgent = enabledAgents.includes(to) ? to : route[to]）只描述派活守护自己起哪个无头面，根本没有描述 workbuddy 自身的输入输出能力。两个组件、两层语义，中间那条「谁触发谁、谁真的执行」的链没验。更危险的是配置读起来很像证据（有文件、有字段、有明确取值），于是推断跳步时不会触发任何警报；而「我没看到它做」与「它做不到」在配置里长得一模一样。
+- **现象**（本机实测）：看到派活守护的配置里写着 route: { <身份甲>: <无头面乙> }（agent-bridge/daemon.config.json），于是我断言「派给 <身份甲> 的黑板任务都会转交 <无头面乙>，所以它收不到」，并进一步写成「<身份甲> 不存在自主巡逻黑板」。实际相反：我派的那张卡，<身份甲> 自己回了执（带完整读数），而且它自己把卡标成了 cancelled；另有多轮 e2e 里 <身份甲> 自己 claim / complete / message。那条断言是错的，差点被写进永久的教训库。（协作方身份与无头执行面的名字中性化为占位，与结论无关；同 §12 口径。）
+- **根因**：把「某组件的配置」当成了「另一个组件被观测到的行为」。那行配置（daemon.js 里 execAgent = enabledAgents.includes(to) ? to : route[to]）只描述派活守护自己起哪个无头面，根本没有描述 <身份甲> 自身的输入输出能力。两个组件、两层语义，中间那条「谁触发谁、谁真的执行」的链没验。更危险的是配置读起来很像证据（有文件、有字段、有明确取值），于是推断跳步时不会触发任何警报；而「我没看到它做」与「它做不到」在配置里长得一模一样。
 - **对策**：
   - 断言某实体的能力或行为之前，手上至少要有一条该实体自身的观测：它自己发的消息、它自己做的状态变更（claim/complete/文件写入）、它的进程或日志。配置只用来解释「某个组件的意图」，不能拿去证明「另一个实体的行为」。
   - 跨组件时先把链画出来：A 的配置 → A 的动作 → B 的输入 → B 的输出。缺哪一段就去测哪一段；测不了就写「未核实」，不要用链条上游的静态字段补下游行为结论。
@@ -218,7 +218,7 @@ agent_created: true
 - **判定**：先拿一条该实体自己的记录，再下结论。两种机械读法都行：
   - 直读黑板库：node -e 借助 node:sqlite 以 readOnly 打开 <黑板>/board.db，在 timeline 表上按 actor=<实体名> 计数（0 次才允许说它做不到）；
   - 或读链：octoboard CLI 的 timeline 子命令输出里 findstr 该实体名，看它有没有自己发起的 message / claim / complete / task-status 行。
-  - 本例读数：actor=workbuddy 在时间线上有多行（回执 message、claim、task-status cancelled、complete）⇒ 它有自主接单能力；而 daemon.config.json 的 route 只描述守护自己的执行选择，两者作用域完全不同。
+  - 本例读数：actor=<身份甲> 在时间线上有多行（回执 message、claim、task-status cancelled、complete）⇒ 它有自主接单能力；而 daemon.config.json 的 route 只描述守护自己的执行选择，两者作用域完全不同。
   - 反向自检：若你只读过配置文件、没读过该实体自己的记录，结论就一律降级为未核实。本例还留了一个可查痕迹：被误判的那张卡面上曾写着不存在自主巡逻黑板，该句已撤回。
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Node v24.18.0（直读 sqlite）/ octoboard CLI · 2026-09-26
 
