@@ -162,6 +162,71 @@ gh api --method PUT repos/<owner>/<repo>/contents/<path> \
 - **复测出入（2026-09-21 · 同机同代理，改的是上面 ③ 的退路顺序）**：`③` 那句"一旦 403 就退到 HTML"**当天就失灵了**——`…/actions/workflows/<file>.html` 匿名 `curl` 回 **200 / 248 695 字节**，但整页 `/actions/runs/` 出现 **0 处**、`"head_sha"`/`"conclusion"`/`"run_number"` 这些键也全 0（run 列表改由前端再取一次）。⇒ 照旧写法会把"切不到 run"读成"没有 run"，而且 `commit/<sha>` 页同样是客户端渲染（574 332 字节里 `lint` 出现 0 次），所以这不是"最近没跑 CI"，是**匿名 HTML 这条路已经不给数据**。
   当天真正可用的退路是**带凭据的同一个 REST**：`HTTPS_PROXY=http://127.0.0.1:<端口> gh api "repos/<owner>/<repo>/actions/runs?per_page=3"`，一次就回 `9 e3b30dd9 lint completed/success`——token 走另一档配额，不吃匿名那 60/h。**新顺序**：① 未认证 REST → ② 403 就换已认证 CLI 打**同一个 REST**（别换端点、别换参数） → ③ HTML 页只当"站点活着"的旁证；真要拿它做判据，先在同一页面上喂一个**已知存在的串**自证抓取面有内容，否则它的 0 命中不算读数。
 
+## 10. Node 连"代理环境变量"都不读：本机代理只在 WinINET 层时，要显式点亮 `NODE_USE_ENV_PROXY`
+
+- **现象**：浏览器能开 github.com，`curl` 直连也能通，唯独 Node 脚本报 `ECONNREFUSED 127.0.0.1:<端口>`（像是被代理拖累），或反过来"代理软件开着、Node 却连不上某个只走代理才通的地址"。同一份 env，curl 与 Node 结论相反。
+- **根因（三层，别再混）**：本机代理只配在 **WinINET 层**（注册表 `ProxyEnable=1`、`ProxyServer=127.0.0.1:<端口>`）。这一层**没有一个命令行为自己读**：git 不读（§1）、curl/Schannel 不读，**Node 也不读——而且 Node 连 `HTTPS_PROXY` 这类环境变量都不读**，除非显式设 `NODE_USE_ENV_PROXY=1`。所以"代理软件在跑"对 Node 进程而言是无关事实。
+- **对策**：需要走代理的 Node 脚本（含桥里探活某个本地服务的 `fetch`）在 spawn env 里加 `NODE_USE_ENV_PROXY=1`，并同时给 `HTTPS_PROXY`；不需要代理的**不要设**，否则会莫名其妙去连那个回环端口。注意 `NODE_USE_ENV_PROXY` 只管 Node 本体，子进程（git/curl）各走各的规则。
+- **判定（一次实验出两条读数，别靠猜）**：把 `HTTPS_PROXY` 指到一个**确定没人监听**的死端口（如 `127.0.0.1:1`），对同一 URL 各跑一次：
+
+  | 通路 | 不带 flag | 带 `NODE_USE_ENV_PROXY=1` |
+  |---|---|---|
+  | Node `global fetch` | **HTTP 200 / +8235ms**（env 被无视，走直连） | **ECONNREFUSED / +18ms**（真去连了那个死代理） |
+  | Node `node:https.request` | HTTP 403（直连被限流，仍是"通了"） | ECONNREFUSED |
+  | 子进程 `curl` | exit 7 | exit 7（curl 无 flag 也读 `HTTPS_PROXY`） |
+
+  ⇒ **耗时就是一等读数**：秒级 = 这条通路没读 env；十几毫秒的 ECONNREFUSED = 读了 env。三行同时说明：**flag 对 fetch 和 core `https` 都生效**（不是只管 undici），而 **curl 与 Node 默认行为相反**——用"curl 能通"推断"Node 也能通"必然翻车。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · node v24.18.0 · curl 8.18.0(Schannel) · 死代理端口 `127.0.0.1:1` 做反证 · 2026-09-28（探针 `<工作区根>/temp/proxy-node-probe.mjs`、`proxy-surface-probe.mjs`）
+  **未测到的部分**：没验 WinINET 代理开着时 Node 是否曾间接受益（本实验只证明"env 不被读"这一层）；未测 `NO_PROXY` 的例外语义。
+
+## 11. ★ 代理通、curl 通，唯独 git 的 CONNECT 被 502 —— 用 SSH over 443 绕过
+
+- **现象**：一个「能用」的本地代理，`curl -x http://127.0.0.1:<端口> https://github.com` 回 **200**，同一分钟 `git ls-remote/fetch/push` 全部报
+  `fatal: unable to access 'https://github.com/...': CONNECT tunnel failed, response 502`。
+- **根因（`GIT_CURL_VERBOSE=1` 一眼看出）**：git 发的 CONNECT 请求与 curl 不同——
+  ```
+  > CONNECT github.com:443 HTTP/1.1
+  > Proxy-Connection: Keep-Alive          ← git 独有
+  （curl 会先发：> Host: github.com:443  ← git 不发）
+  < HTTP/1.1 502 Bad Gateway              ← 且精确等 10 秒才回（代理侧超时）
+  ```
+  该代理要求 CONNECT 带 `Host:` 头、不接受只带 `Proxy-Connection` 的写法 → 每个 git 请求被拒。**不是网络坏、不是代理坏、是 git 2.55 的 CONNECT 头构成与该代理不兼容。**
+- **先排除的三个无效方向（都试过、都无效，别重复烧轮次）**：
+  | 尝试 | 结果 |
+  |---|---|
+  | `git -c http.proxyKeepAlive=false` | 无效（该开关不控制这个头） |
+  | `git -c http.proxyAuthMethod=basic` | 无效（不是认证问题） |
+  | `git -c "http.extraHeader=Host: github.com:443"` | 无效（`extraHeader` **不作用于 CONNECT 阶段**，只管隧道建立后的请求） |
+  | 直连（`env -u HTTPS_PROXY ...`） | 无效（本机直连 GitHub 不通） |
+- **对策（★ 可行解）：SSH over 443**（GitHub 官方支持，走 `ssh.github.com:443`，与走 HTTPS 的代理策略常常不同）：
+  ```bash
+  # 1) 先判活（本机已有 ~/.ssh/id_ed25519 且 GitHub 侧已授权时，会回 "Hi <user>! You've successfully authenticated"）
+  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -T -p 443 git@ssh.github.com
+
+  # 2) 沙箱里 ~/.ssh/known_hosts 常写不进去 → known_hosts 指到工作区外的可写位置
+  mkdir -p <可写目录>/ssh
+  cp ~/.ssh/known_hosts <可写目录>/ssh/known_hosts 2>/dev/null
+
+  # 3) 用 SSH URL 推送（注意：清掉代理 env，SSH 不走 HTTP 代理）
+  cd <repo>
+  env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+    GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=<可写目录>/ssh/known_hosts -o StrictHostKeyChecking=accept-new -p 443" \
+    git push ssh://git@ssh.github.com:443/<owner>/<repo>.git HEAD:main
+  ```
+  成功输出长得和普通 push 一样：`<旧 sha7>..<新 sha7>  HEAD -> main`。
+- **三个沙箱细节**：
+  1. `Failed to add the host to the list of known hosts (~/.ssh/known_hosts，打印的是本机主目录下的那个路径)` —— **不是失败**，只是写不进 known_hosts；用 `-o UserKnownHostsFile=<可写目录>/ssh/known_hosts` 解决。
+  2. 不设 `GIT_SSH_COMMAND` 时直接报 `Host key verification failed` —— 因为 known_hosts 写不进去，每次都是"未知主机"。
+  3. **推送后必须用同一条 SSH 通道 fetch 回来核对**，否则 `origin/main` 仍是旧值：
+     ```bash
+     ... git fetch ssh://git@ssh.github.com:443/<owner>/<repo>.git main:refs/remotes/origin/main
+     git rev-list --left-right --count origin/main...HEAD   # 期望 "0  0"
+     git ls-remote ... main                                  # 力证：远端 sha == 本地 HEAD
+     ```
+- **判定**：`curl 200 + git 502` 的组合出现时，**不要再调 git 参数**，直接判为该代理与 git 的 CONNECT 不兼容 → 走 SSH over 443。若 SSH 也不通，再退 §6 Contents API。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · git 2.55.0.windows.3 · Git Bash 5.2.37 · curl 8.21.0(Schannel) · 2026-10-02
+  （实测：`curl -x http://127.0.0.1:<端口> https://github.com` = 200；`GIT_CURL_VERBOSE=1 git ls-remote` 抓到 CONNECT 请求头差异 + `17:27:24.888 → 17:27:34.890` 整 10 秒超时；`ssh -T -p 443 git@ssh.github.com` 回 `Hi <user>!`；SSH 推 4 个 commit 成功、`rev-list --left-right --count` = `0 0`。**未测到的部分**：没验证该代理是否对所有 git 版本都拒 `Proxy-Connection`（只在 2.55 上复现）；没测 SSH 22 端口是否也通。）
+
 ## 复用信号
 
-- "浏览器/gh 能用只有 git 不行" → §1；"端口能连但请求挂" → §2；"这个客户端说不通行另一个说不通" → §3；"OOM 的字节数像配置的默认值" → §4；"push 不报错也不成功" → §5 → §6；"每次都是 401/422" → §7；"核对时两个 SHA 对不上 / 条数差一截" → §8；"CI 绿但说不出跑在哪条提交 / 徽章和 API 读数打架" → §9。
+- "浏览器/gh 能用只有 git 不行" → §1；"端口能连但请求挂" → §2；"这个客户端说不通行另一个说不通" → §3；"OOM 的字节数像配置的默认值" → §4；"push 不报错也不成功" → §5 → §6；"每次都是 401/422" → §7；"核对时两个 SHA 对不上 / 条数差一截" → §8；"CI 绿但说不出跑在哪条提交 / 徽章和 API 读数打架" → §9；"curl 能通但 Node 报 ECONNREFUSED 127.0.0.1:<端口> / 代理软件开着 Node 却当它不存在" → §10；**"curl 拿 200 但 git 报 CONNECT tunnel failed, response 502"** → §11（SSH over 443）。
