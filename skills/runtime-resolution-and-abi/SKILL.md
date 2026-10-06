@@ -48,7 +48,8 @@ agent_created: true
   `... NODE_MODULE_VERSION 137. This version of Node.js requires NODE_MODULE_VERSION 127 ... better_sqlite3.node`
   而换另一个 Node 二进制跑同一条命令就正常。
 - **根因**：`better-sqlite3` 这类原生插件按编译时的 **模块 ABI**（Node 24 → 137，Node 22 → 127）产出 `.node`，二进制不向后兼容。机器上并存多个 Node（安装版、nvm/volta/fnm 的 shim、IDE 自带）时，`node` 解析到哪个决定成败。
-- **对策**：**先用匹配 ABI 的那个二进制跑，别急着重编**。判定：
+- **对策**：**先用匹配 ABI 的那个二进制跑，别急着重编**。
+- **判定**：
   ```bash
   node -p "process.versions.modules"      # 当前解释器的 ABI
   where node                              # PATH 里谁在前

@@ -89,12 +89,12 @@ for i in close_ids:
 
 - **现象**：`connect_over_cdp` 挂住无响应、最终超时；或连上了但 `evaluate` / `new_page` 卡住。看起来像网络问题。
 - **根因**：脚本每次 `new_page()` 却从不关，几十个 page target 之后 CDP 命令循环本身被拖死。
-- **对策 / 判定**（顺序不要反，这一步能省掉一次重启）：
+- **判定**（顺序不要反，这一步能省掉一次重启）：
   ```bash
   curl -s http://127.0.0.1:9222/json/list |
     python -c "import sys,json,collections;d=json.load(sys.stdin);print('total',len(d),dict(collections.Counter(t.get('type') for t in d)))"
   ```
-  数量离谱就**只精准关脚本自己开的重复 page**（见 §3），再重试 connect。**不要**因为"连不上"就直接杀 Chrome——那是最贵的一步，还会连带丢登录态。
+- **对策**：数量离谱就**只精准关脚本自己开的重复 page**（见 §3），再重试 connect。**不要**因为"连不上"就直接杀 Chrome——那是最贵的一步，还会连带丢登录态。
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · Chrome 153.0.8010.48 · python 3.12.10 · 2026-09-18
 - **复测确认（2026-09-18 · Chrome 153）**：计数命令实测有效：`total 6 {'background_page': 2, 'page': 1, 'browser_ui': 2, 'service_worker': 1}`。注意新版 Chrome 的 target 类型比 page/iframe 丰富（出现 `background_page`、`browser_ui`、`service_worker`）——统计时按完整 Counter 打出来，别只看 page 数。
 
@@ -111,7 +111,8 @@ for i in close_ids:
 
 - **现象**：`taskkill //F //IM chrome.exe` 之后 `tasklist` 里 chrome 还在，**命令没有任何报错**。
 - **根因**：Git Bash/MSYS 把 `//F` 重写掉了（详见 shell-quoting-and-path-forms §7）。
-- **对策**：用**单斜杠** `taskkill /F /IM chrome.exe`；**每次杀完必须 `tasklist | grep -i chrome` 复查**，把输出当证据，不要相信"命令跑完了"。
+- **对策**：用**单斜杠** `taskkill /F /IM chrome.exe`。
+- **判定**：**每次杀完必须 `tasklist | grep -i chrome` 复查**，把输出当证据，不要相信"命令跑完了"。
 - **红线**：这只针对脚本自己起的调试 Chrome。用户机器上可能有别的 Chrome 窗口属于他正在做的事——批量关之前先确认不会误杀（关页面/重启等于动用户的账号会话，属于对外可见的动作）。
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · git 2.53.0.windows.2 · cmd 10.0 · 2026-09-18
 - **复测出入（2026-09-18 · Git Bash 5.2.37 / git 2.53.0.windows.2，与原文对策方向相反）**：本机实测完整矩阵（全部用不存在的进程名，或本实例 PID，无副作用）：

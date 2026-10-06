@@ -10,7 +10,7 @@ agent_created: true
 
 ## 1. 带斜杠的 ref 写入：旧版记为"MSYS 吞掉"，本机同版本三次未复现 ⇒ 别当既定行为，但判据要留着
 
-- **原始事故（现已无法复现，保留以备对账）**：`git update-ref refs/heads/agent/writer/<名> <sha>` 或 `git checkout -B <含斜杠分支>` 返回 0，而 `.git/refs/heads/...` 不存在、HEAD 变 unborn；objects 与工作区写入都正常，只有 ref 这一层回滚。
+- **现象**（原始事故，现已无法复现，保留以备对账）：`git update-ref refs/heads/agent/writer/<名> <sha>` 或 `git checkout -B <含斜杠分支>` 返回 0，而 `.git/refs/heads/...` 不存在、HEAD 变 unborn；objects 与工作区写入都正常，只有 ref 这一层回滚。
 - **复测取值（同机同版本，2026-09-17 两轮 + 2026-09-18 一轮）**：`update-ref` 退出码 **0** 且 ref 文件**存在**（41 字节）、`git rev-parse --verify` 退出码 **0**；`checkout -B agent/writer/<名>` 后 `branch --show-current` 正常报出该名、`symbolic-ref HEAD` 就指向它，没有 unborn；全新 clone 与既有 clone 一致。⇒ **不要再把"斜杠 ref 被吞"当成本机默认预期**，也别在 `update-ref` 成功时怀疑它没生效。
 - **根因（假设，未被复现支持）**：MSYS 的路径转换把 `a/b/c` 形态的 ref 当文件系统路径处理。若在别的 MSYS/git 组合上真命中，补准确版本号回来，本节结论按版本号收窄而不是改写。
 - **对策（只在命中时用）**：
