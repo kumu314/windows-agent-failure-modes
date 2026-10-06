@@ -57,7 +57,7 @@ agent_created: true
 
 - **现象**：`git apply --check /d/work/x.patch` → `error: can't open patch: No such file or directory`；`git commit-tree -F $(mktemp)` → `fatal: could not open '/tmp/tmp.XXXX'`。而 `ls /d/work/x.patch`、`cat /tmp/tmp.XXXX` 在 bash 里都好好存在。
 - **根因**：`/d/`、`/tmp` 是 MSYS 挂载点，Git for Windows 是原生程序不参与映射；bash 内建与 coreutils 参与。同族：Git Bash 里 `curl -o /dev/null` 返回**退出码 23**（CURLE_WRITE_ERROR），把 `&&` 链断在身后。
-- **对策**：交给原生程序的参数一律 Windows 形态（`D:/work/x.patch`）或仓库内相对路径（先 `cp /d/.../x.patch .git/x.patch` 再 `git apply --check .git/x.patch`）；只要 HTTP 码就 `curl -s -o <真实文件> -w "%{http_code}"`，别用 `/dev/null`。
+- **对策**：交给原生程序的参数一律 Windows 形态（`D:/<work>/x.patch`）或仓库内相对路径（先 `cp /d/.../x.patch .git/x.patch` 再 `git apply --check .git/x.patch`）；只要 HTTP 码就 `curl -s -o <真实文件> -w "%{http_code}"`，别用 `/dev/null`。
 - **判定**：`bash 侧看得见 + 原生程序报 No such file` = 就是这条，不要去查权限。
 
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37(1)-release(x86_64-pc-msys) · git 2.53.0.windows.2 · curl 8.18.0 · Node v24.18.0 · Python 3.12.10 · 2026-09-21
@@ -78,7 +78,7 @@ agent_created: true
 
 - **现象**：bash 里 `curl -o /tmp/a.json` 成功，紧接着 `python -c "open('/tmp/a.json')"` → `FileNotFoundError`。反过来 Windows Python 往 `/tmp` 写，bash 也看不见。
 - **根因**：MSYS `/tmp` 映射到某个私有目录，Windows 解释器把它按字面解析（常落到当前盘根的 `\tmp`）。
-- **对策**：跨 bash↔Python 传递的中间文件一律写 **Windows 绝对路径**，且放在仓库外（`D:/tmp/…` 之类），避免被 `git add` 顺手收进来。
+- **对策**：跨 bash↔Python 传递的中间文件一律写 **Windows 绝对路径**，且放在仓库外（`D:/<tmp>/…` 之类），避免被 `git add` 顺手收进来。
 - **判定**：`python -c "import tempfile;print(tempfile.gettempdir())"` 与 `echo $TMPDIR / /tmp` 两边对一下即穿帮。
 
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · Python 3.12.10 · 2026-09-21
@@ -90,8 +90,8 @@ agent_created: true
 
 ## 6. `cd /d/xxx` 与含空格路径
 
-- **现象**：`cd /d D:\work` 在 Git Bash 里报 `cd: too many arguments`（`/d` 是 cmd.exe 的开关，不是 bash 的）；`cd "D:\新建 文件夹"` 或带中文的路径被拆成多段。
-- **对策**：bash 用 `cd "D:/work"`（正斜杠 + 盘符 + 引号）；需要 cmd 语义就显式 `cmd /c`。任何含空格/中文的路径**永远加引号**。
+- **现象**：`cd /d D:\<work>` 在 Git Bash 里报 `cd: too many arguments`（`/d` 是 cmd.exe 的开关，不是 bash 的）；`cd "D:\<带空格或中文的目录>"` 或带中文的路径被拆成多段。
+- **对策**：bash 用 `cd "D:/<work>"`（正斜杠 + 盘符 + 引号）；需要 cmd 语义就显式 `cmd /c`。任何含空格/中文的路径**永远加引号**。
 - **判定**：同一命令换 `cd "D:/x"` 形式即成功，可确诊是形态问题而非目录不存在。
 
 - **验证于**：Windows 11 家庭中文版 10.0.26200.9457 · Git Bash 5.2.37 · 2026-09-21
@@ -157,8 +157,8 @@ agent_created: true
 - **根因**：**命令替换会剥掉输出末尾的所有换行符**。文件的最后一个字节是 `\n`，捕获进变量后就没了，哈希自然不同。这是"看起来是内容差异、其实是取值形态差异"的典型。同一段里还有第二种假差异：那次 `curl` 根本没抓到东西（走代理与否决定），返回空串，`md5sum` 得到 **`d41d8cd98f00b204e9800998ecf8427e`**（空输入的 md5，一眼可认），却被读成"远端和本地不一样"。
 - **对策**：**比对永远在文件上做**，别让内容过一遍 shell 变量：
   ```bash
-  curl -sS -m 45 --proxy http://127.0.0.1:<端口> -o "D:/tmp/remote.md" "<url>"
-  diff "D:/tmp/remote.md" "<本地文件>" && echo IDENTICAL
+  curl -sS -m 45 --proxy http://127.0.0.1:<端口> -o "D:/<tmp>/remote.md" "<url>"
+  diff "D:/<tmp>/remote.md" "<本地文件>" && echo IDENTICAL
   ```
   非要用变量比，就把换行补回去再哈希：`printf '%s\n' "$V" | md5sum`（但仍不如 `diff` 直观，`diff` 还能指出差在哪一行）。
 - **判定**：① 哈希等于 `d41d8cd98f00b204e9800998ecf8427e` ⇒ 是**空输入**，问题在抓取不在内容（按 `silent-failure-triage §2` 先证明取值通道有效）；② 两侧字节数只差 1 且文件尾是换行 ⇒ 命中本条；③ `wc -c` 两侧相同 + `diff` 为空，才算真一致。

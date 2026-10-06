@@ -132,9 +132,9 @@ gh api --method PUT repos/<owner>/<repo>/contents/<path> \
   ```bash
   R=<owner>/<repo>
   gh api "repos/$R/git/trees/HEAD%5E%7Btree%7D?recursive=1" \
-    --jq '.tree[] | "\(.mode) \(.type) \(.sha) \(.path)"' > D:/tmp_api.txt
-  git ls-tree -r -t HEAD | tr '\t' ' ' > D:/tmp_git.txt
-  diff D:/tmp_git.txt D:/tmp_api.txt && echo IDENTICAL
+    --jq '.tree[] | "\(.mode) \(.type) \(.sha) \(.path)"' > D:/<tmp>/api.txt
+  git ls-tree -r -t HEAD | tr '\t' ' ' > D:/<tmp>/git.txt
+  diff D:/<tmp>/git.txt D:/<tmp>/api.txt && echo IDENTICAL
   ```
   两侧都取 **full SHA**，别拿 7 位短 SHA 参与比对。
 - **判定**：① 上面 `diff` 为空且本地 `git cat-file -t <远端返回的 commit.sha>` 不报错 = 真一致；② 报"少文件"之前先读返回体的 **`.truncated`**——大仓库的 `recursive=1` 会截断，`truncated: true` 时"远端少了几条"是**接口没返回**，不是仓库真缺；③ 只有当换掉 `tr '\t' ' '` 之后 diff 才变红，才说明确实是内容差异而不是分隔符。

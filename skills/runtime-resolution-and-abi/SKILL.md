@@ -61,7 +61,7 @@ agent_created: true
 
 - **现象**：Git Bash 里 `node --version` 是 A，PowerShell 里是 B；用户终端能跑，自动化环境报"找不到/版本过低"；计划任务里连命令都找不到。
 - **根因**：Machine PATH 与 User PATH 拼接顺序不同、各 shell 的 profile 追加不同目录、Windows 存根目录排在真实安装之后（或之前）。
-- **对策**：任何要交付/复用的脚本，**内部写绝对路径**（`D:\...\node.exe`、`C:\...\Python312\python.exe`），别依赖 PATH 解析；`.bat`/`.ps1` 里同理。给非技术用户的东西要"找不到就明确提示改这一行"，否则他们会卡在看不懂的 9009。
+- **对策**：任何要交付/复用的脚本，**内部写绝对路径**（`D:\<node 安装路径>\node.exe`、`C:\<python 安装目录>\python.exe`），别依赖 PATH 解析；`.bat`/`.ps1` 里同理。给非技术用户的东西要"找不到就明确提示改这一行"，否则他们会卡在看不懂的 9009。
 - **判定**：
   ```bash
   which -a python python3 node npm        # 列出所有候选与优先级
