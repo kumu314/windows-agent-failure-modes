@@ -109,13 +109,13 @@ for i in close_ids:
 
 ## 6. 杀不掉、以及"杀掉"这件事本身
 
-- **现象**：`taskkill //F //IM chrome.exe` 之后 `tasklist` 里 chrome 还在，**命令没有任何报错**。
-- **根因**：Git Bash/MSYS 把 `//F` 重写掉了（详见 shell-quoting-and-path-forms §7）。
-- **对策**：用**单斜杠** `taskkill /F /IM chrome.exe`。
+- **现象**：`taskkill` 之后 `tasklist` 里 chrome 还在，**命令没有任何报错**。
+- **根因**：Git Bash/MSYS 的参数形态问题（完整矩阵见下；原理在 shell-quoting-and-path-forms §7）。
+- **对策**：Git Bash 直调写 `taskkill //F //IM <名>`；需要 cmd 包装写 `cmd //c "taskkill /F /IM <名>"`；或加 `MSYS_NO_PATHCONV=1` 前缀（三行的实测结果见下「复测出入」矩阵）。更可靠的正解是绕开 taskkill 走 CDP `Browser.close`（§3 附带、§7 复测）。
 - **判定**：**每次杀完必须 `tasklist | grep -i chrome` 复查**，把输出当证据，不要相信"命令跑完了"。
 - **红线**：这只针对脚本自己起的调试 Chrome。用户机器上可能有别的 Chrome 窗口属于他正在做的事——批量关之前先确认不会误杀（关页面/重启等于动用户的账号会话，属于对外可见的动作）。
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37 · git 2.53.0.windows.2 · cmd 10.0 · 2026-09-18
-- **复测出入（2026-09-18 · Git Bash 5.2.37 / git 2.53.0.windows.2，与原文对策方向相反）**：本机实测完整矩阵（全部用不存在的进程名，或本实例 PID，无副作用）：
+- **复测出入（2026-09-18 · Git Bash 5.2.37 / git 2.53.0.windows.2，与 2026-08 旧版"用单斜杠"的 advice 方向相反）**：本机实测完整矩阵（全部用不存在的进程名，或本实例 PID，无副作用）：
 
   | 写法 | 实际结果 |
   |---|---|
@@ -125,7 +125,7 @@ for i in close_ids:
   | `cmd //c "echo hello"` / `cmd //c "taskkill /F /IM <名>"` | **正确**：输出 `hello` / `错误: 没有找到进程 "…"` |
   | `MSYS_NO_PATHCONV=1 taskkill /F /IM <名>`（或 `MSYS_NO_PATHCONV=1 cmd /c …`） | **正确**：参数原样传递 |
 
-  真实清理验证：`taskkill //F //PID <本实例 PID>` 退出码 0，随后 `curl /json/version` 立即失联（进程真死）。**结论**：原文"用单斜杠并整体交给 `cmd /c`"在本机环境下两半都不能工作（`/F` 与 `/c` 都会被 MSYS 转换）；Git Bash 直调写 `//F //IM`，需要 cmd 包装写 `cmd //c "taskkill /F /IM …"`，或用 `MSYS_NO_PATHCONV=1` 前缀。两版并存（原文按 cmd.exe 直接调用/旧版 MSYS 理解），同批复测注记见 shell-quoting-and-path-forms §7。
+  真实清理验证：`taskkill //F //PID <本实例 PID>` 退出码 0，随后 `curl /json/version` 立即失联（进程真死）。**结论**：旧版"用单斜杠并整体交给 `cmd /c`"在本机环境下两半都不能工作（`/F` 与 `/c` 都会被 MSYS 转换）；Git Bash 直调写 `//F //IM`，需要 cmd 包装写 `cmd //c "taskkill /F /IM …"`，或用 `MSYS_NO_PATHCONV=1` 前缀。两版并存的说法保留在旧版按 cmd.exe 直接调用/旧版 MSYS 理解的读法里，但本机的可复跑正解以矩阵为准（同批复测注记见 shell-quoting-and-path-forms §7）。更可靠的正解是绕开 taskkill：CDP `Browser.close`（§3 附带、§7 复测）。
 
 ## 7. 登录态继承：复制 profile 的时机与前置条件
 
@@ -227,6 +227,7 @@ for i in close_ids:
 ## 复测范围（2026-09-18 / 2026-09-21 两批，另记 2026-10-04 一手复核）
 
 - **2026-09-18 批已复测**：§1 / §4 / §5 前两步 / §6 / §10（隔离实例 + 专用 profile 启动，未触碰任何用户会话）。其中 §1（就绪等待时间）与 §6（`//F` vs `/F`）各有一处与原文不符或方向相反的出入，已按"保留两版 + 标适用范围"处理。
+- **2026-10-08 归位（不是新复测，也没有新增断言）**：§6 的 现象/根因/对策 三段当时仍写着被本节矩阵推翻的旧版写法，构成同节自相矛盾——矩阵判 `taskkill /F /IM …`（Git Bash 直调）与 `cmd /c "…"` 两种写法不正确，三段却把它们当对策。已把三段改为与矩阵同向、按矩阵标注适用范围；对策里的三种写法全部取自本节矩阵判为正确的行，`Browser.close` 那条取自 §3 与 §7 的实测。判定行与红线未动。
 - **2026-09-18 批当时未复测**：§2、§3、§7、§8、§9（原因各异：需真实代理环境对照 / 针对用户浏览器的禁令不宜实测 / 涉及真实 Cookie 与登录态 / 需真实登录场景 / 需 CDP 客户端库）。未复测 ≠ 不成立，仅表示该轮未取得新证据。
 - **2026-09-21 批补齐其中四节半**：§2（环境变量代理与 `--proxy-server` 各管各的，判据改看服务端自己记的请求行）、§3（剂量反应 + 有头/无头分叉，五组试验全按 profile 标记数进程）、§7（自建隔离 profile，分"运行中 / 归零后"两种状态复制 Cookie）、§8（本地替身造出"状态码 200 + 业务码未登录"的同一响应两种读数）；§9 半节——本机没有任何 CDP 客户端库，改用 Node 内置 WebSocket 在 CDP 层等价复跑，Playwright 层的 `contexts[0]` / `new_page()` 仍未复跑。
 - **2026-10-04 一手记录复核**：§11 不重演整轮断连（不能真的去关用户正在用的那台浏览器），改为重读当日运行日志与批量脚本源码逐条取数；§3 的清理安全阀用合成 target 列表跑了五组。
