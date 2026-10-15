@@ -403,6 +403,60 @@ UI 类改动的验证要落到**可测量**的东西：取色、坐标、派生�
   已全部改为通用写法（类名 `.map-node` / `.node-bg`，私有页面只称"一个 CSS 主题检查页"）；
   色值、百分比、像素与 node/edge 计数等实测读数一字未动。）
 
+## 19. 读数登记成证据之后又被下一轮同名重跑：板上哈希永久对不上盘，而"文件还在、名字也对、里面确实有 DONE 行"三重看着正常
+
+- **现象**（把全板 `evidence` 逐行按现盘字节重算 sha256，一次跑完）：905 行里 820 行带哈希且文件在盘，**112 行与盘上不等**；这 112 行**全部**是「盘上 mtime 晚于该行登记时刻」（反向 0 行、时刻不可解析 0 行）。其余档位：`ABSENT=14`（登记的 ref 已不在盘上）、`UNHASHED=71`（行里没有哈希）、`NOREF=0`。
+  按文件角色拆开才是重点：**97 行指向仍在演进的源码/技能正文**——登记的是当时那一版，文件后来还要继续改，不等是正常后果，不是事故；**15 行指向一次性读数文件**，这一类才真的坏。
+  这 15 行里两支最干净：`state15-registration-verify.txt` 与 `state16-resident-verify.txt`。盘上正文**末行自报的是别的轮次**（`PROBE19-DONE rc=0` / `PROBE20-DONE rc=0`），盘上 mtime 分别是 `17:23:09`、`17:23:12`，登记时刻分别是 `17:21:03`、`17:21:05`；同一轮在 `17:29:29` 又把这两个路径**各登记了一次**，第二次与盘上相等。
+  第三支形状不同：`usage-backfill-20260929.jsonl` 是个**一直往上追加**的日志，三次登记（`09-28T17:35`、`09-28T18:05`、`10-05T18:37`）**全部**对不上现盘字节。
+  当时"看着正常"有三重：文件存在、文件名与板上记录一致、文件里有 DONE 行——**唯独字节不是登记那一刻的字节**。
+
+- **根因**：
+  - ① **读数的落点是脚本里的常量**（`OUT = <readings-dir>/state15-….txt`）。下一轮把同一份脚本改个编号复用，路径常量留在旧值上，shell 与 `open(...,"w")` 的截断都不问一句。名字说 15、字节来自 19，就是这么来的。
+  - ② **登记的语义**：`evidence` 行里的 sha256 只是"我对**那一刻那份字节**负责"，而带哈希链的协作板**只能追加、不能改**。同名重写之后那一行永久无法自证——事后无论重跑多少次都只会更不等，唯一处置是追加一条订正。
+  - ③ **体检的单位错**：按"文件"问"这个文件在板上有匹配吗"会答"有"，因为**同一文件上有一条新行是匹配的**。实测 15 行里 9 行属于这种（`PATH-REUSED`，同路径另一行等于现盘字节），6 行属于更坏的一种（`NO-ROW-MATCHES`，现盘字节在板上从没登记过 ⇒ 那一行指向的字节**在这台机器上已不存在**）。全板有 7 个路径同时挂着「一条匹配行」与「一条不匹配行」，单一路径最多被 8 行引用。
+  - 追加型日志那一支是同一个根因的另一张脸：只要载体在登记后还会变（重写或追加），行就永久失效，与"谁改的"无关。
+
+- **对策**：
+  - ① 登记之后把那份读数当**只读**：要再测就**换新文件名**（新编号或时刻后缀），不要在原路径重跑；订正走追加行并现算哈希比对，不改链。
+  - ② 登记前两步存在性检查：盘上该路径**不存在**（或存在且字节与将要登记的相同）、且板上没有别的 `evidence` 行用过同一 basename——basename 撞名就是覆盖风险的先兆。
+  - ③ 体检**按行不按文件**，报数必须带角色拆分：只报 112 会把 97 行正常演进读成一场事故。
+  - ④ 别把**持续追加**的载体（`*.jsonl`、正在写的 log）登记成证据；要登记就先冻结一份快照再登记快照。
+  - ⑤ 「文件名里的编号 vs 正文末行自报的编号」只能当**归因**手段，不能当判据：实测这 15 行里它只认得出 2 行（其余 13 行末行根本没有 sentinel），而在哈希匹配的那批里它也筛出过 3 行不符（有一轮把旧 sentinel 打印进了新文件）。判据只有逐行哈希那一条。
+
+- **判定**：本机 `sqlite3` 命令行在 Git Bash 里通常没有，走 Python 标准库。存成 `audit_evidence.py`，用法 `<python> audit_evidence.py <board.db> <readings-dir>`：
+  ```python
+  import hashlib, os, sqlite3, sys
+  DB, RD = sys.argv[1], os.path.abspath(sys.argv[2]).replace(os.sep, "/").lower()
+  con = sqlite3.connect(DB); con.row_factory = sqlite3.Row
+  rows = con.execute("select ref, sha256, created_at from evidence").fetchall()
+  cur, seen = {}, {}
+  for r in rows:
+      ref = (r["ref"] or "").strip().replace(os.sep, "/")
+      sha = (r["sha256"] or "").strip()
+      if not sha or not os.path.isfile(ref):
+          continue                      # ABSENT / UNHASHED 另档，别混进这次比较
+      if ref not in cur:
+          cur[ref] = hashlib.sha256(open(ref, "rb").read()).hexdigest()
+      seen.setdefault(ref, set()).add(sha)
+  ck = ok = bad = 0
+  for ref, shas in seen.items():
+      for sha in shas:
+          if sha != cur[ref]:
+              bad += 1
+              if RD in ref.lower():
+                  kind = "PATH-REUSED" if cur[ref] in (shas - {sha}) else "BYTES-NEVER-REGISTERED"
+                  print("READINGS-DRIFT %s %s" % (ref, kind))
+          else:
+              ok += 1
+      ck += len(shas)
+  print("checked=%d ok=%d mismatch=%d" % (ck, ok, bad))
+  ```
+  读数怎么判：`checked > 0` 且 `ok > 0` 是**仪器自证**——`ok = 0` 先怀疑哈希口径而不是板子坏了（本文件 §13：过滤器不会响时，0 命中和全命中一样危险）。出现 `READINGS-DRIFT … PATH-REUSED` ⇒ 该路径在登记后被同名重写过，旧行永久失效，处置只能是追加订正。出现 `READINGS-DRIFT … BYTES-NEVER-REGISTERED` ⇒ 更重：那一行声称的字节在盘上已经没有载体，只能靠登记时的正文或备份复现，**不能靠重跑探针复现**（重跑得到的是新字节，新字节对不上旧行）。
+  分母必须一起报（本文件 §14）：`checked` 是"带哈希且文件在盘"的行数，不是 `evidence` 总行数；两者差出来的档位（ABSENT / UNHASHED）要各自有数。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37（MSYS 3.6.6 / git 2.53.0.windows.2）· Python 3.13.2 · 2026-10-16
+  （实测读数：`rows=905`、`KINDS {ABSENT:14, UNHASHED:71, OK:708, MISMATCH:112, NOREF:0}`、`CONTROL denominator: hashed-on-disk-files-checked=820 ok=708 mismatch=112`、`MISMATCH split: mtime-AFTER=112 BEFORE=0 unparsed=0`；角色拆分 `scratch=15 tracked-or-source=97 sum=112`；逐行归因 `drift-rows=15 path-reused=9 current-bytes-never-registered=6`；末行 sentinel 比较在 mismatch 档 `MATCH=0 DIFFER=2 NO-SENTINEL=6`、在哈希匹配档 `MATCH=74 DIFFER=3 NO-SENTINEL=237`；`distinct-scratch-paths=470 paths-with-both-OK-and-MISMATCH-rows=7`、`max-rows-per-path=8`。同一支探针两次独立运行（01:28 与 01:34）在 `mismatch=112`、`absent=14` 两个数上相等。本节只写文件名与时刻，完整路径留在读数文件里。）
+
 ## 复用信号
 "命令报成功但结果不对""退出码 0 但什么都没发生""这个目录是空的（其实不是）""任务在但没跑过""PR 说合了但还是 OPEN""两个人报的命中数差好几倍" → 先怀疑判定层级不够低或分母不是一个，而不是怀疑功能坏了。
 
