@@ -457,6 +457,115 @@ UI 类改动的验证要落到**可测量**的东西：取色、坐标、派生�
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37（MSYS 3.6.6 / git 2.53.0.windows.2）· Python 3.13.2 · 2026-10-16
   （实测读数：`rows=905`、`KINDS {ABSENT:14, UNHASHED:71, OK:708, MISMATCH:112, NOREF:0}`、`CONTROL denominator: hashed-on-disk-files-checked=820 ok=708 mismatch=112`、`MISMATCH split: mtime-AFTER=112 BEFORE=0 unparsed=0`；角色拆分 `scratch=15 tracked-or-source=97 sum=112`；逐行归因 `drift-rows=15 path-reused=9 current-bytes-never-registered=6`；末行 sentinel 比较在 mismatch 档 `MATCH=0 DIFFER=2 NO-SENTINEL=6`、在哈希匹配档 `MATCH=74 DIFFER=3 NO-SENTINEL=237`；`distinct-scratch-paths=470 paths-with-both-OK-and-MISMATCH-rows=7`、`max-rows-per-path=8`。同一支探针两次独立运行（01:28 与 01:34）在 `mismatch=112`、`absent=14` 两个数上相等。本节只写文件名与时刻，完整路径留在读数文件里。）
 
+## 20. 写入回显成功、行也真在表里，但归属与寻址列是没人校验的自由文本：按它过滤会把行读成"没发生过"
+
+- **现象**（一个多执行体共写的 SQLite 协作库：哈希链时间线 + 留证表 + 私信表。下面每个数出自同一份读数、同一次运行，2026-10-16 23:39 现读，同一命令连跑两遍逐行全等；写入侧每一笔都回显过成功）：
+  - 留证表 1016 行里，"指向哪条"那列 **NULL=209 行**（20.6%）、空串 0 行；同一张表的内容哈希列 **NULL=71 行**（7.0%）——那 71 行从没带过哈希，可当时登记的回显一样是成功。
+  - 私信表 724 行里，收件人列 **NULL=28 行 + 空串=2 行**（合起来 4.1%）；同一张表的发件人列 724 行全有值（空格占 0.0%）。同一把尺子在同一张表上一格全空、一格全满，说明这不是"库没在写"。
+  - 时间线里"笔记"这类行 1020 行：会话归属列 **NULL=881 行**（86.4%），而"引用到哪张表"那列 **有值=0 行**（空格占 100.0%）⇒ 拿引用去反查一条笔记，命中率是 0，不是查得少。
+  - 归属列全板 25 种取值、4166 行；其中同一个执行面占 **8 种拼法**（大小写、连字符、后缀各不相同）。这族全部行 1709 行，按"最常见那一拼"做等值过滤只读到 1030 行，**丢 679 行（占该族 39.7%）**；只看笔记行是 401 行读到 291 行，**丢 110 行（27.4%）**。
+  - 反直觉的地方：这些行的正文都在库里、时刻也对、写入方都拿到了成功回显。坏的不是写，是"按这几列读"——而读的人看不到任何报错。
+
+- **根因**：
+  - ① 这些列声明成无约束文本，写入端既不校验也不给默认值，接口回报的只有"插入成功"。**插入成功只证明这一行存在，不证明那一格有值**。而 `NULL` 参与比较的结果是 unknown，`where col='x'` 与 `where col<>''` 都不会把它捞进来——"这一格没写"和"这条不存在"在结果集里是同一个形状。
+  - ② 身份有两套命名空间（机器 id 与显示名）。把"这个收件人查无此人"判在其中一个上必然出错：同一份私信，身份池取 id 与 name 的并集（52 个）⇒ **0 种**孤儿；池只取 id 一列（26 个）⇒ **17 种**。后一个数不是数据里的，是口径造出来的。
+  - ③ 执行面改名、或一个身份拆成几个面时，历史行不跟着迁移 ⇒ 归属列的取值全集与身份表行数是两回事（这里 25 种取值对 26 行身份表），单值等值过滤必然漏，而漏的量级实测是三分之一到四成。
+  - ④ 一张表按类型列混行时，某些列只对某些类型填。对"某类恒为空"的列做反查，是在查一个从来不写的格——笔记行的引用列 1020 行全板 0 行有值，不是被删了。
+  - ⑤ 还有一种诱惑是给静默降级编个成因："身份表里那行名字错了一个字，所以私信没人读"。要这么解释，先数一字之差的配对数：实测 **0 组**；再加上 ② 的并集口径下孤儿本来就是 0 种，这套解释当场不成立。
+  - ⑥ 同一类"合法但看不见"也长在查询自己身上：本节这版脚本初稿把 `group by` 漏了，族统计报成「同族 1 种、行数等于全板」——每格单看都正常，只有"族内 1 种却等于全板行数"这个形状暴露它。自对照不写进判据，就会把仪器错当成发现。
+
+- **对策**：
+  - ① 归属/寻址列先量四格分账：NULL、空串、有值、总行数，并要求 `NULL + 空串 + 有值 == 总数`（分账全等）。**有值格为 0 时，"0 命中"不算发现**——先怀疑过滤器看的是不填的那格，而不是怀疑记录丢了。
+  - ② 判"孤儿取值"先把池子口径钉死，并把两种口径的数一起报出来（只取一列 vs 取并集）：这两个数之差本身就是读数。
+  - ③ 按归属列过滤之前先 `group by` 打取值全集，同族拼法归成一个集合再 `in (...)`；别拿"最常见那一拼"当族名。
+  - ④ 反查前先证这条路存在：`select count(*) … where 引用列 is not null and 类型列='…'`。得 0 就换按正文短语定位，并写成"这条路没有"，不写成"记录丢失"。
+  - ⑤ 每条"读不到"必须配一条同列正控：这列在别处有没有非零命中。实测同表读状态列已读 **546 行 / 724 行 = 75.4%** ⇒ 这列在正常写，那 0 才是寻址问题，不是列坏了。
+  - ⑥ 每个计数查询都要有一条能识破自己形状的对照（取值种数对全板种数、族内行数对全板行数）；等式一侧塌成 1 而另一侧等于全量，就是漏了分组。
+  - ⑦ 报数带读数时刻与分母。活库的分母随追加漂移——本节这些行数在写完这些读数之后又变过，所以它们是"某一刻的分账"，不是常量。
+
+- **判定**：本机 `sqlite3` 命令行通常没有（最后一行现测为 False），走 Python 标准库。存成 `audit_attribution.py`，用法 `<python> audit_attribution.py <db 路径> <同一执行面的拼法前缀>`；表名、类型取值按你的库改：
+  ```python
+  import os, shutil, sqlite3, sys
+
+  DB, ROOT = sys.argv[1], sys.argv[2]
+  con = sqlite3.connect("file:" + DB.replace(os.sep, "/") + "?mode=ro", uri=True)
+
+
+  def bucket(table, col, pred=""):
+      def cnt(extra):
+          parts = [p for p in (pred, extra) if p]
+          sql = "select count(*) from %s" % table
+          if parts:
+              sql += " where " + " and ".join(parts)
+          return con.execute(sql).fetchone()[0]
+      nul, blank = cnt(col + " is null"), cnt(col + " = ''")
+      filled = cnt(col + " is not null and " + col + " <> ''")
+      total = cnt("")
+      empty = nul + blank
+      print("BUCKET %s.%s [%s] NULL=%d 空串=%d 有值=%d 合计=%d 分账全等=%s 空格占=%0.1f%%"
+            % (table, col, pred, nul, blank, filled, total,
+               nul + blank + filled == total, 100.0 * empty / total if total else 0))
+      return empty, total
+
+
+  bucket("evidence", "target")
+  bucket("evidence", "sha256")
+  bucket("messages", "to_agent")
+  bucket("messages", "from_agent")
+  bucket("timeline", "session_id", "kind='note'")
+  bucket("timeline", "ref_table", "kind='note'")
+
+
+  def pool(use):
+      return {r[0] for r in con.execute("select %s from agents" % use) if r[0]}
+
+
+  wide, narrow = pool("id") | pool("name"), pool("id")
+  addrs = [r[0] for r in con.execute("select distinct to_agent from messages") if r[0]]
+  print("ORPHAN 池取 id 与 name 并集时=%d 种 池只取 id 时=%d 种（池分别=%d 与 %d 个，差值=口径造成的假孤儿）"
+        % (len([a for a in addrs if a not in wide]), len([a for a in addrs if a not in narrow]),
+           len(wide), len(narrow)))
+
+
+  def near(a, b):  # 一字之差：等长且恰有一格不同
+      return len(a) == len(b) and sum(1 for x, y in zip(a, b) if x != y) == 1
+
+
+  names = sorted(wide)
+  pairs = sum(1 for i, a in enumerate(names) for b in names[i + 1:] if near(a, b))
+  print("CTRL3 身份表内一字之差的配对=%d 组（要拿「名字错一个字」解释孤儿，先让这个数非 0）" % pairs)
+
+
+  def fam(prefix, pred=""):
+      sql = ("select actor, count(*) from timeline where actor is not null"
+             " and lower(actor) like ?")
+      if pred:
+          sql += " and " + pred
+      sql += " group by actor"
+      by = dict(con.execute(sql, (prefix.lower() + "%",)).fetchall())
+      if not by:
+          return 0, 0, 0, 0
+      top = max(by, key=by.get)
+      return len(by), sum(by.values()), by[top], sum(by.values()) - by[top]
+
+
+  for label, pred in (("全部行", ""), ("仅笔记", "kind='note'")):
+      n, tot, hit, lost = fam(ROOT, pred)
+      print("FAMILY %s 同族拼法=%d 种 族内行=%d 个 只按最常见那一拼读到=%d 个 丢=%d 个 丢占该族=%0.1f%%（不打印取值）"
+            % (label, n, tot, hit, lost, 100.0 * lost / tot if tot else 0))
+
+  print("CTRL2 全板归属列取值=%d 种 全板行=%d 个；族内只报出 1 种而族内行等于全板行时，先怀疑查询漏了 group by"
+        % (con.execute("select count(distinct actor) from timeline where actor is not null").fetchone()[0],
+           con.execute("select count(*) from timeline where actor is not null").fetchone()[0]))
+
+  row = con.execute("select count(nullif(read_at,'')), count(*) from messages").fetchone()
+  print("CTRL 同一张表另一列的正控：私信已读行=%d 个 / 共 %d 个 = %0.1f%%（这列在写，前面的 0 命中才是寻址问题）"
+        % (row[0], row[1], 100.0 * row[0] / row[1]))
+  print("TOOL sqlite3 CLI 在 PATH=%s（False 就继续用本脚本）" % bool(shutil.which("sqlite3")))
+  ```
+  读数怎么判：六条 `BUCKET` 的 `分账全等` 必须全是 True；`有值=0` 只说明这列对这类行不填，不说明行丢了。`ORPHAN` 两个数不等（这里 0 种对 17 种）就把两种口径一起写进结论，别只留一个。`CTRL3` 是 0 组时，"名字错一个字"这套解释就不能拿来收账。`FAMILY` 报的是"按单值等值过滤"的代价：丢的数非 0 就改用集合过滤重跑一遍，两遍的行数差要一起报——**「最常见那一拼」不能当族名用**，这行只报丢多少、不报取值本身，取值留在读数文件里。`CTRL2` 是分组对照：族内种数报 1 而族内行数等于全板行数，就是查询自己漏了 `group by`。`TOOL` 为 False 时别去找命令行，直接用这份脚本。
+- **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37（MSYS 3.6.6 / git 2.53.0.windows.2）· Python 3.13.2 · 2026-10-16
+
 ## 复用信号
 "命令报成功但结果不对""退出码 0 但什么都没发生""这个目录是空的（其实不是）""任务在但没跑过""PR 说合了但还是 OPEN""两个人报的命中数差好几倍" → 先怀疑判定层级不够低或分母不是一个，而不是怀疑功能坏了。
 
