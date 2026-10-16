@@ -1,6 +1,6 @@
 ---
 name: git-ref-plumbing-on-windows
-description: Git for Windows / Git Bash 里 git 引用层与索引层的静默失效，以及 plumbing 提交的安全用法。绕开正常 checkout、手搓提交、批量删分支、回滚之前读。触发词：update-ref 无效、unborn branch、checkout -b 回滚、commit-tree、write-tree、索引残留、文件莫名被删、packed-refs、worktree、force-with-lease、git add -A、filter-branch -d、TMP_DIR。
+description: Git for Windows / Git Bash 里 git 引用层与索引层的静默失效，以及 plumbing 提交的安全用法。绕开正常 checkout、手搓提交、批量删分支、回滚之前读。触发词：update-ref 无效、unborn branch、checkout -b 回滚、commit-tree、write-tree、索引残留、文件莫名被删、packed-refs、worktree、force-with-lease、git add -A、filter-branch -d、TMP_DIR、只读对象删不掉、WinError 5。
 agent_created: true
 ---
 
@@ -165,5 +165,61 @@ agent_created: true
 - **验证于**：Windows 11 家庭中文版 10.0.26200 · Git Bash 5.2.37（MSYS 3.6.6）· git 2.53.0.windows.2 · 2026-09-18 首发（真实代价：一份清洗脚本被 `-f -d` 吃掉），2026-09-19 一次性 clone 复测七态并更正根因与对策
 - **与首发稿不一致处**：首发记为"收尾无条件 `rm -fr`"。复测更正为两支——启动期那次**只在 `-f` 下**执行（无 `-f` 时文件存活、命令退 1 并报 `Not a directory`），退出 trap 那次才是无条件；首发稿的对策"先 `mkdir -p <dir>` 再传 `-d`"实测**反而必退 1**，正确做法是传一个尚不存在的路径。
 
+## 12. git 自己写出的对象文件带只读属性：递归删除到第一枚就断，而残骸的 `git status` / `log` / `add` / `commit` 全绿
+
+- **现象**：清理一次性靶场仓时 `shutil.rmtree(<repo>)` 抛 `PermissionError: [WinError 5] 拒绝访问。`，`e.filename` 指在 `.git/objects/<2位>/<40位hex>` 这类对象文件上（三件靶场三处崩点各不同），**但抛出时目录树已经被删掉一大片**：本机三例 `25→8`、`27→10`、`29→11`。把**同一条命令连跑 5 次**，每次都停在同一枚只读对象上、剩余文件数一格不变（10 个文件 / 其中 3 枚只读）⇒ "再试一次"不收敛。这一族在本机撞过两次以上：一次清理脚本 abort 在 pack 的 `.idx`/`.pack` 上，另一次删前留份量到 52 枚只读文件构成受阻面。
+  那 17 格被删掉的全是可写文件：`.git/hooks/*.sample` 14 枚 + `.git/info/exclude` + `.git/logs/HEAD` + `.git/logs/refs/heads/main`；活下来的 8 格是 `HEAD`、`config`、`index`、`description`、`COMMIT_EDITMSG`、2 枚松散对象、`refs/heads/main`。⇒ **残骸不是坏仓**：`git status --porcelain` rc=0 且空输出、`git log` 正常出提交、`git fsck` rc=0（同型残骸），甚至还能继续 `git add` + `git commit`（双双 rc=0）并新写出 3 枚对象、把 `logs/` 重建出来。所以用 `ignore_errors=True` 收尾的清理脚本会留下一个"没有 hooks、没有 reflog、只读对象还在"的半仓，下次复用同一路径时把它当新仓使。
+- **根因**：git 把对象文件落成 mode `0o444` 并置 Windows 只读属性（实测 `ro_attr=True`、`ls -l` 显示 `-r--r--r--`）。Windows 上只读属性禁止 unlink，返回 `ERROR_ACCESS_DENIED`(5)、Python 侧 `errno=13`；POSIX 上 unlink 只看父目录写位、不看文件自身 mode ⇒ **同一段删除代码在 Git Bash 里 `rm -rf` rc=0，在 CPython 里必崩**。`rmtree` 自底向上逐个 unlink、第一个失败即抛 ⇒ 只读文件一枚也删不掉（两例实测 `ro_before=ro_after`：3→3、3→3），而排在崩点之前的可写文件已经没了，存活集合由遍历顺序决定，看着像随机。
+  只读位由**建仓方式**决定，不是"git 仓都删不掉"（本机实测）：
+
+  | 仓的来路 | 只读文件 | 附带读数 |
+  |---|---|---|
+  | `git init` + 一次带文件的提交 | 3，全在松散对象 | mode `0o444`、`ro_attr=True` |
+  | 同仓再加一笔提交（未 gc） | 4，仍全在松散对象 | 对象数随提交增长，每枚都带只读位 |
+  | 再 `git gc` | 4 = `pack/*.idx` + `*.pack` + `*.rev` + `objects/info/commit-graph` | `git prune -v`、`git repack -a -d` 都 rc=0，**只读数不减** |
+  | 默认路径形态的本地 `git clone` | 3 | **硬链接共享对象库**：`st_ino` 与源仓同一枚，在克隆侧补写位会把源仓那枚对象一起改成可写 |
+  | `git clone --no-hardlinks` | **0** | 普通拷贝，全部可写 |
+  | `git clone file:///…`（源 gc 与否都一样） | 3，全在 `objects/pack/` | 收进 pack |
+  | 复制一份仓树（`shutil.copytree` / `cp -R`） | 与源相同（3→3） | 只读位随复制传播 ⇒ "先拷一份再删"不解决问题 |
+
+- **对策**：
+  - Python 删除一律带 chmod-重试回调。3.12+ 用 `onexc=`，旧版用 `onerror=`，签名同为 `(func, path, exc)`（本机 3.13.2 用 `onerror=` 实测可用且 `warning_categories=[]`）：
+    ```python
+    import os, shutil, stat
+    def _force_rm(func, path, exc):
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    shutil.rmtree(repo, onexc=_force_rm)      # 实测 root_exists=False
+    ```
+  - PowerShell 必须带 `-Force`：`Remove-Item -LiteralPath <repo> -Recurse -Force` 实测 rc=0 删净；不带 `-Force` rc=1 且同样半途而废（cp936 正文 `你没有足够的访问权限执行此操作`、`CategoryInfo : PermissionDenied`），按 UTF-8 解码那份 stderr 会成乱码，要用 `gbk`。Git Bash 的 `rm -rf` 本机 rc=0 可用。
+  - 想要一份"天生删得掉"的克隆：`git clone --no-hardlinks`（实测 0 枚只读）。这不是永久保证——之后任何一次 `git gc` / `repack` 都会重新写出只读 pack。
+  - 硬链接克隆时别把 chmod 当无害操作：清克隆的只读位等于改源仓的对象。要么删前先 `--no-hardlinks` 重克一份，要么明确接受"源侧属性也被改掉"。
+  - 别指望 `git` 自检替你判删除是否完成（上面现象段五项全绿）。判据只有两条：根目录不存在，或剩余文件数为 0。
+  - `cmd` 的 `rd /s /q` 这条通道本机**未判定**：连 `cmd //c echo HI` 都 rc=1 `命令语法不正确`（argv 列表 / 单串 / `.bat` / `shell=True` 四种调法，加一份全可写对照仓，全一样）。那是调用面故障，不是 `rd` 的行为证据，所以本节不写它的结论——**别把"我这条命令没跑起来"当成"它删不掉"**。
+- **判定**：三问三把尺，逐条回显读数。先花 20 秒在自己的靶场仓上量，别拿真实项目仓试。
+  ```bash
+  R="<一次性靶场目录>/rodel"; rm -rf "$R"; mkdir -p "$R"
+  git init -q "$R" && git -C "$R" -c user.email=t@t -c user.name=t commit -q --allow-empty -m one
+  find "$R" -type f | wc -l                     # 本机实测 25
+  find "$R" -type f ! -perm -u=w | wc -l        # 本机实测 2（空树对象 + 提交对象）⇒ >0 就不许写"已删除"
+  rm -rf "$R"; [ -e "$R" ] && echo "NOT-GONE" || echo "GONE"      # 本机 GONE（MSYS 不受只读位阻挡）
+  ```
+  ```python
+  # Windows 原生口径，与上面 find 同一把尺；本机对同一个 25 文件仓给出 ro=2
+  import os, stat
+  p = "<repo>"
+  ro = [os.path.join(d, f) for d, _, fs in os.walk(p) for f in fs
+        if not (os.stat(os.path.join(d, f)).st_mode & stat.S_IWRITE)]
+  print("ro=%d sample=%s" % (len(ro), ro[:3]))
+  ```
+  ```powershell
+  # 检测器自己也要 -Force：仓里 .git 的属性是 Hidden, Directory，不加就整棵不进 .git
+  @(Get-ChildItem -LiteralPath <repo> -Recurse -Force -File).Count
+  @(Get-ChildItem -LiteralPath <repo> -Recurse -Force -File -Attributes ReadOnly).Count
+  ```
+  本机实测两把尺的差：一个 27 文件的仓（工作区有 1 个文件），无 `-Force` 得 **1 / 0**、加 `-Force` 得 **27 / 3**；一个 25 文件的仓（无工作区文件），无 `-Force` 得 **0 / 0**、加 `-Force` 得 **25 / 2**。⇒ 无 `-Force` 那份不是"少算几枚"，是把整个对象库看不见，据此会得出"没有只读文件、可以放心删"的反向结论。另外仓里的**目录**本身不带只读位（`read_only_dirs=0`），别按目录判。
+- **复测范围**：本节读数全部出自一次性靶场（`git init` + 提交、`--allow-empty` 单提交、`gc`/`repack` 后的仓、路径形态与 `file://` 形态克隆、`--no-hardlinks` 克隆、`copytree`/`cp -R` 副本），未对任何真实项目仓做删除。**未量**：`cmd` 的 `rd` 通道（调用面故障，见对策末条）、`git clone --reference` / `objects/info/alternates` 共享对象库形态、非 ASCII / 含空格路径下的崩点与 `e.filename` 形态、以及杀软或索引服务持有句柄时的共享违例（与只读位同码 `5`，本节没做区分实验）。
+- **验证于**：Windows 11（build 26200，`[System.Environment]::OSVersion.Version` = 10.0.26200.0）· Git Bash 5.2.37（MSYS 3.6.6）· git 2.53.0.windows.2 · Python 3.13.2 · PowerShell 5.1.26100.9549 · 2026-10-17
+
 ## 复用信号
-"`git` 说成功了但分支不存在""提交里多了没改的文件""满屏 D""ref 怎么改都不动""这个提交没有父""命令退出码 0 但我的脚本不见了" → 先当作 `.git` 状态问题，按 §1/§2/§4 逐层验；凡是绕开正常流程改写 `.git` 的操作（§2、§11），不要用"再试一次"代替读状态。
+"`git` 说成功了但分支不存在""提交里多了没改的文件""满屏 D""ref 怎么改都不动""这个提交没有父""命令退出码 0 但我的脚本不见了""仓删到一半报拒绝访问、剩下的仓 git 自检全绿" → 先当作 `.git` 状态问题，按 §1/§2/§4 逐层验；凡是绕开正常流程改写 `.git` 的操作（§2、§11），不要用"再试一次"代替读状态；删除半途失败时，判"删干净没有"只能数剩余文件，别用仓内 git 自检（§12）。
